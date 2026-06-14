@@ -10,13 +10,13 @@ Each note includes the pin title, description, alt text, Pinterest link, source 
 
 ## GitHub Actions Schedule
 
-The workflow in `.github/workflows/sync.yml` runs every 10 minutes, offset from the top of the hour to avoid GitHub Actions schedule congestion. GitHub documents that scheduled workflows can be delayed during high load, that the start of every hour is a high-load time, and that queued jobs can be dropped when load is high enough. See GitHub's [`schedule` event documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule). The workflow can also be started manually from the GitHub Actions tab.
+The scheduled sync workflow in `.github/workflows/scheduled-sync.yml` runs every 10 minutes, offset from the top of the hour to avoid GitHub Actions schedule congestion. GitHub documents that scheduled workflows can be delayed during high load, that the start of every hour is a high-load time, and that queued jobs can be dropped when load is high enough. See GitHub's [`schedule` event documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule). The workflow can also be started manually from the GitHub Actions tab.
 
 The 10-minute schedule is mainly for the unsupported public-profile fallback, because Pinterest currently exposes only a small recent public list there. The official API path can tolerate a slower schedule, but using one schedule keeps the repository simple.
 
 The `sync` job keeps `state/state.json` in the GitHub Actions cache and uploads it as a workflow artifact after each run. This is enough for one personal scheduled job; do not run multiple schedules for the same Pinterest/Evernote account in parallel.
 
-The workflow uses Node.js 24-compatible action majors: `actions/checkout@v6`, `actions/cache@v5`, and `actions/upload-artifact@v6`.
+The CI workflow in `.github/workflows/sync.yml` runs tests on push and pull requests. Both workflows use Node.js 24-compatible action majors: `actions/checkout@v6`, `actions/cache@v5`, and `actions/upload-artifact@v6`.
 
 ## Required GitHub Secrets
 
@@ -74,7 +74,7 @@ Optional Pinterest behavior:
 - `MAX_IMAGE_BYTES`: maximum image download size. Defaults to `26214400`.
 - `DRY_RUN`: fetch and log without writing Evernote or state. Defaults to `false`.
 
-The GitHub workflow uses `STATE_PATH=state/state.json` because the Actions cache is configured for the `state/` directory.
+The scheduled GitHub workflow uses `STATE_PATH=state/state.json` because the Actions cache is configured for the `state/` directory.
 
 ## Pinterest API
 
