@@ -23,6 +23,14 @@ Use refresh-token mode for unattended runs:
 - `PINTEREST_REFRESH_TOKEN`
 - `EVERNOTE_AUTH_TOKEN`
 
+Pinterest token links:
+
+- Create/register a Pinterest app from [Pinterest Developers - My apps](https://developers.pinterest.com/apps/).
+- Follow [Set up authentication and authorization](https://developers.pinterest.com/docs/getting-started/set-up-authentication-and-authorization/) to get the app ID/client ID, client secret, authorization code, access token, and refresh token.
+- Request the scopes `boards:read,pins:read`. If you need secret boards, also request `boards:read_secret,pins:read_secret`.
+- Use the returned `pinr...` value as `PINTEREST_REFRESH_TOKEN`; this tool refreshes the short-lived `pina...` access token automatically during each run.
+- Optional: use Pinterest's [Token Debugger](https://developers.pinterest.com/docs/developer-tools/token-debugger/) to inspect token validity and scopes.
+
 Optional direct Pinterest access token:
 
 - `PINTEREST_ACCESS_TOKEN`
