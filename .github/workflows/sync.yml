@@ -1,0 +1,117 @@
+name: Pinterest Saves to Evernote
+
+on:
+  schedule:
+    # Daily at 03:17 UTC.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  STATE_PATH: state/state.json
+
+jobs:
+  test:
+    name: Test
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    container: rust:1.95
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            target
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Test
+        run: cargo test --locked
+
+  sync:
+    name: Sync
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    container: rust:1.95
+    concurrency:
+      group: pinterest-saves-to-evernote-sync
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            target
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Restore sync state
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: pinterest-saves-to-evernote-state-${{ github.run_id }}
+          restore-keys: |
+            pinterest-saves-to-evernote-state-
+
+      - name: Sync Pinterest saves to Evernote
+        run: cargo run --locked -- sync
+        env:
+          PINTEREST_CLIENT_ID: ${{ secrets.PINTEREST_CLIENT_ID }}
+          PINTEREST_CLIENT_SECRET: ${{ secrets.PINTEREST_CLIENT_SECRET }}
+          PINTEREST_REFRESH_TOKEN: ${{ secrets.PINTEREST_REFRESH_TOKEN }}
+          PINTEREST_ACCESS_TOKEN: ${{ secrets.PINTEREST_ACCESS_TOKEN }}
+          EVERNOTE_AUTH_TOKEN: ${{ secrets.EVERNOTE_AUTH_TOKEN }}
+          EVERNOTE_NOTE_STORE_URL: ${{ secrets.EVERNOTE_NOTE_STORE_URL }}
+          EVERNOTE_NOTEBOOK_GUID: ${{ secrets.EVERNOTE_NOTEBOOK_GUID }}
+          EVERNOTE_TAGS: ${{ vars.EVERNOTE_TAGS }}
+          PINTEREST_BOARD_IDS: ${{ vars.PINTEREST_BOARD_IDS }}
+          PINTEREST_FETCH_MODE: ${{ vars.PINTEREST_FETCH_MODE }}
+          PINTEREST_INCLUDE_SECTIONS: ${{ vars.PINTEREST_INCLUDE_SECTIONS }}
+          PINTEREST_API_BASE_URL: ${{ vars.PINTEREST_API_BASE_URL }}
+          BACKFILL_EXISTING: ${{ vars.BACKFILL_EXISTING }}
+          MAX_PINS_PER_RUN: ${{ vars.MAX_PINS_PER_RUN }}
+          ATTACH_IMAGES: ${{ vars.ATTACH_IMAGES }}
+          MAX_IMAGE_BYTES: ${{ vars.MAX_IMAGE_BYTES }}
+          DRY_RUN: ${{ vars.DRY_RUN }}
+
+      - name: Ensure state directory exists
+        if: always()
+        run: mkdir -p state
+
+      - name: Save sync state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: pinterest-saves-to-evernote-state-${{ github.run_id }}
+
+      - name: Upload sync state artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pinterest-state-${{ github.run_id }}
+          path: state/state.json
+          if-no-files-found: ignore
+          retention-days: 90
