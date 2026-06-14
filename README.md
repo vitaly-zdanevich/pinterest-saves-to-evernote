@@ -10,9 +10,9 @@ Each note includes the pin title, description, alt text, Pinterest link, source 
 
 ## GitHub Actions Schedule
 
-The scheduled sync workflow in `.github/workflows/scheduled-sync.yml` runs every 10 minutes at minutes `:09`, `:19`, `:29`, `:39`, `:49`, and `:59`, offset from the top of the hour to avoid GitHub Actions schedule congestion. GitHub documents that scheduled workflows can be delayed during high load, that the start of every hour is a high-load time, and that queued jobs can be dropped when load is high enough. See GitHub's [`schedule` event documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule). The workflow can also be started manually from the GitHub Actions tab.
+The scheduled sync workflow in `.github/workflows/scheduled-sync.yml` runs hourly at minute `:19`, offset from the top of the hour to avoid GitHub Actions schedule congestion. GitHub documents that scheduled workflows can be delayed during high load, that the start of every hour is a high-load time, and that queued jobs can be dropped when load is high enough. See GitHub's [`schedule` event documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule). The workflow can also be started manually from the GitHub Actions tab.
 
-The 10-minute schedule is mainly for the unsupported public-profile fallback, because Pinterest currently exposes only a small recent public list there. The official API path can tolerate a slower schedule, but using one schedule keeps the repository simple.
+The hourly schedule is conservative for GitHub Actions reliability. If you use the unsupported public-profile fallback, remember that Pinterest currently exposes only a small recent public list there, so very active accounts may need a more frequent external scheduler.
 
 The `sync` job keeps `state/state.json` in the GitHub Actions cache and uploads it as a workflow artifact after each run. This is enough for one personal scheduled job; do not run multiple schedules for the same Pinterest/Evernote account in parallel.
 
