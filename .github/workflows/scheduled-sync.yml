@@ -3,7 +3,7 @@ name: Pinterest Saves to Evernote
 on:
   schedule:
     # Every 10 minutes, offset from :00 to avoid GitHub Actions top-of-hour load.
-    - cron: "7,17,27,37,47,57 * * * *"
+    - cron: "9,19,29,39,49,59 * * * *"
   workflow_dispatch:
 
 permissions:
