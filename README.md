@@ -12,6 +12,8 @@ The workflow in `.github/workflows/sync.yml` runs once per day at `03:17 UTC`. I
 
 The `sync` job keeps `state/state.json` in the GitHub Actions cache and uploads it as a workflow artifact after each run. This is enough for one personal scheduled job; do not run multiple schedules for the same Pinterest/Evernote account in parallel.
 
+The workflow uses Node.js 24-compatible action majors: `actions/checkout@v6`, `actions/cache@v5`, and `actions/upload-artifact@v6`.
+
 ## Required GitHub Secrets
 
 Use refresh-token mode for unattended runs:
