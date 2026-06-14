@@ -2,8 +2,8 @@ name: Pinterest Saves to Evernote
 
 on:
   schedule:
-    # Every 10 minutes. The public-profile fallback only exposes a small recent window.
-    - cron: "*/10 * * * *"
+    # Every 10 minutes, offset from :00 to avoid GitHub Actions top-of-hour load.
+    - cron: "7,17,27,37,47,57 * * * *"
   workflow_dispatch:
   push:
     branches:

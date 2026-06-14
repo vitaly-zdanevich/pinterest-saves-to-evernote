@@ -10,7 +10,7 @@ Each note includes the pin title, description, alt text, Pinterest link, source 
 
 ## GitHub Actions Schedule
 
-The workflow in `.github/workflows/sync.yml` runs every 10 minutes. It can also be started manually from the GitHub Actions tab.
+The workflow in `.github/workflows/sync.yml` runs every 10 minutes, offset from the top of the hour to avoid GitHub Actions schedule congestion. It can also be started manually from the GitHub Actions tab.
 
 The 10-minute schedule is mainly for the unsupported public-profile fallback, because Pinterest currently exposes only a small recent public list there. The official API path can tolerate a slower schedule, but using one schedule keeps the repository simple.
 
