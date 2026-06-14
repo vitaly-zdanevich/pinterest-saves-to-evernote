@@ -2,6 +2,8 @@
 
 Rust CLI for a scheduled GitHub Actions job that exports newly saved Pinterest pins to Evernote.
 
+This exists because Pinterest saves are not durable archives: Pins and their source images can disappear when Pinterest, the uploader, or the source site removes them. The sync creates one Evernote note per new saved Pin and can attach the image itself, so your saved reference survives outside Pinterest.
+
 The default first run is intentionally a baseline run: it records all currently visible Pinterest pins in `state/state.json` and creates no Evernote notes. Later runs create one Evernote note per new pin only. Set `BACKFILL_EXISTING=true` only if you deliberately want to import existing history.
 
 Each note includes the pin title, description, alt text, Pinterest link, source link, image URL, board metadata, and the image itself when Pinterest returns a downloadable image URL. Pinterest API v5 does not expose pin comments, so comments are not exported.
@@ -25,6 +27,7 @@ Use refresh-token mode for unattended runs:
 
 Pinterest token links:
 
+- Pinterest currently requires a business account to create developer apps. Convert your existing Pinterest account from [Account settings](https://www.pinterest.com/settings/account-settings/) with `Convert account`; this should be the same account that contains the saved Pins you want to sync.
 - Create/register a Pinterest app from [Pinterest Developers - My apps](https://developers.pinterest.com/apps/).
 - Follow [Set up authentication and authorization](https://developers.pinterest.com/docs/getting-started/set-up-authentication-and-authorization/) to get the app ID/client ID, client secret, authorization code, access token, and refresh token.
 - Request the scopes `boards:read,pins:read`. If you need secret boards, also request `boards:read_secret,pins:read_secret`.
