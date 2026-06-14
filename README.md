@@ -10,7 +10,9 @@ Each note includes the pin title, description, alt text, Pinterest link, source 
 
 ## GitHub Actions Schedule
 
-The workflow in `.github/workflows/sync.yml` runs once per day at `03:17 UTC`. It can also be started manually from the GitHub Actions tab.
+The workflow in `.github/workflows/sync.yml` runs every 10 minutes. It can also be started manually from the GitHub Actions tab.
+
+The 10-minute schedule is mainly for the unsupported public-profile fallback, because Pinterest currently exposes only a small recent public list there. The official API path can tolerate a slower schedule, but using one schedule keeps the repository simple.
 
 The `sync` job keeps `state/state.json` in the GitHub Actions cache and uploads it as a workflow artifact after each run. This is enough for one personal scheduled job; do not run multiple schedules for the same Pinterest/Evernote account in parallel.
 
@@ -18,12 +20,14 @@ The workflow uses Node.js 24-compatible action majors: `actions/checkout@v6`, `a
 
 ## Required GitHub Secrets
 
-Use refresh-token mode for unattended runs:
+For the supported Pinterest API path, use refresh-token mode for unattended runs:
 
 - `PINTEREST_CLIENT_ID`
 - `PINTEREST_CLIENT_SECRET`
 - `PINTEREST_REFRESH_TOKEN`
 - `EVERNOTE_AUTH_TOKEN`
+
+For the unsupported public-profile fallback, only `EVERNOTE_AUTH_TOKEN` is required; set `PUBLIC_PROFILE_TO_PARSE_WITHOUT_API` as a GitHub Actions variable instead of adding Pinterest API secrets.
 
 Pinterest token links:
 
@@ -38,6 +42,14 @@ Optional direct Pinterest access token:
 
 - `PINTEREST_ACCESS_TOKEN`
 
+Unsupported public-profile fallback while waiting for Pinterest API verification:
+
+- Add a GitHub Actions variable named `PUBLIC_PROFILE_TO_PARSE_WITHOUT_API`.
+- Set it to your public Pinterest profile or pins URL, for example `https://www.pinterest.com/vitalyzdanevich/pins/`.
+- When this variable is set, the tool does not use Pinterest OAuth. It fetches the public profile HTML and parses the JSON-LD profile snippet instead.
+- This currently exposes a small recent list, about 10 public pins, with pin title, image URL, Pinterest URL, original Pinterest author, and `datePublished`. It does not expose comments, private/secret boards, full board metadata, or the original source link.
+- This is fragile and unsupported by Pinterest; keep the API credentials as the preferred long-term path.
+
 Optional Evernote variables:
 
 - `EVERNOTE_NOTE_STORE_URL`: if omitted, the tool resolves it through Evernote UserStore.
@@ -51,6 +63,7 @@ These optional Evernote values can be stored as GitHub Actions secrets too.
 
 Optional Pinterest behavior:
 
+- `PUBLIC_PROFILE_TO_PARSE_WITHOUT_API`: public Pinterest profile URL or username to parse without API access. This is an unsupported fallback and overrides the API fetch path when set.
 - `PINTEREST_BOARD_IDS`: comma-separated board IDs. If omitted, the tool lists all boards and then pins on each board.
 - `PINTEREST_FETCH_MODE`: `boards` or `account`. Defaults to `boards`.
 - `PINTEREST_INCLUDE_SECTIONS`: also list board-section pins. Defaults to `true`.

@@ -176,6 +176,60 @@ pub async fn resolve_access_token(settings: &Settings) -> Result<String> {
         .ok_or_else(|| anyhow!("PINTEREST_ACCESS_TOKEN is required"))
 }
 
+pub async fn public_profile_saved_pins(settings: &Settings) -> Result<Vec<SavedPin>> {
+    let source = settings
+        .public_profile_to_parse_without_api
+        .as_deref()
+        .ok_or_else(|| anyhow!("PUBLIC_PROFILE_TO_PARSE_WITHOUT_API is required"))?;
+    let url = public_profile_url(source)?;
+
+    let client = reqwest::Client::builder()
+        .user_agent(CLIENT_NAME)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .context("failed to build Pinterest public profile HTTP client")?;
+
+    info!(
+        url = url.as_str(),
+        "fetching public Pinterest profile without API"
+    );
+    let response = client
+        .get(url.clone())
+        .header(
+            reqwest::header::ACCEPT,
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch public Pinterest profile {url}"))?;
+
+    let status = response.status();
+    let final_url = response.url().clone();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "public Pinterest profile fetch returned HTTP {status} for {final_url}: {body}"
+        ));
+    }
+
+    let html = response.text().await.with_context(|| {
+        format!("failed to read public Pinterest profile HTML from {final_url}")
+    })?;
+    let pins = parse_public_profile_html(&html)?;
+    if pins.is_empty() {
+        return Err(anyhow!(
+            "public Pinterest profile parser found no recent pins in {final_url}; the profile may be private or Pinterest changed the page format"
+        ));
+    }
+
+    info!(
+        pins = pins.len(),
+        url = final_url.as_str(),
+        "parsed public Pinterest profile pins"
+    );
+    Ok(pins)
+}
+
 async fn refresh_access_token(settings: &Settings) -> Result<String> {
     let client = reqwest::Client::builder()
         .user_agent(CLIENT_NAME)
@@ -413,6 +467,220 @@ fn endpoint(api_base_url: &str, path: &str) -> Result<Url> {
     Url::parse(&format!("{base}{path}")).context("invalid Pinterest API URL")
 }
 
+fn public_profile_url(raw: &str) -> Result<Url> {
+    let source = raw.trim();
+    if source.is_empty() {
+        return Err(anyhow!(
+            "PUBLIC_PROFILE_TO_PARSE_WITHOUT_API must not be empty"
+        ));
+    }
+
+    if source.starts_with("http://") || source.starts_with("https://") {
+        return Url::parse(source).context("invalid PUBLIC_PROFILE_TO_PARSE_WITHOUT_API URL");
+    }
+
+    let path = source.trim_matches('/');
+    let path = if path.contains('/') {
+        path.to_string()
+    } else {
+        format!("{path}/pins")
+    };
+    Url::parse(&format!("https://www.pinterest.com/{path}/"))
+        .context("invalid PUBLIC_PROFILE_TO_PARSE_WITHOUT_API profile path")
+}
+
+fn parse_public_profile_html(html: &str) -> Result<Vec<SavedPin>> {
+    let mut deduped = BTreeMap::<String, SavedPin>::new();
+
+    for script in json_ld_scripts(html) {
+        let value = match serde_json::from_str::<Value>(script.trim()) {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(error = %error, "failed to parse Pinterest JSON-LD script");
+                continue;
+            }
+        };
+        collect_json_ld_pins(&value, &mut deduped);
+    }
+
+    Ok(deduped.into_values().collect())
+}
+
+fn json_ld_scripts(html: &str) -> Vec<&str> {
+    let mut scripts = Vec::new();
+    let mut rest = html;
+
+    while let Some(start) = rest.find("<script") {
+        rest = &rest[start..];
+        let Some(tag_end) = rest.find('>') else {
+            break;
+        };
+        let tag = &rest[..=tag_end];
+        let body_start = tag_end + 1;
+        let after_tag = &rest[body_start..];
+        let Some(script_end) = after_tag.find("</script>") else {
+            break;
+        };
+
+        if tag.contains("application/ld+json") {
+            scripts.push(&after_tag[..script_end]);
+        }
+
+        rest = &after_tag[script_end + "</script>".len()..];
+    }
+
+    scripts
+}
+
+fn collect_json_ld_pins(value: &Value, deduped: &mut BTreeMap<String, SavedPin>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                collect_json_ld_pins(item, deduped);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(parts) = object.get("hasPart").and_then(Value::as_array) {
+                for part in parts {
+                    collect_json_ld_pins(part, deduped);
+                }
+            }
+
+            if let Some(saved_pin) = parse_json_ld_pin(value) {
+                deduped.entry(saved_pin.pin.id.clone()).or_insert(saved_pin);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_json_ld_pin(value: &Value) -> Option<SavedPin> {
+    let pin_url = string_field(value, "url")
+        .or_else(|| nested_string_field(value, &["mainEntityOfPage", "url"]))?;
+    let id = extract_pin_id_from_url(&pin_url)?;
+    let image_url = image_url_from_value(value.get("image"))
+        .or_else(|| image_url_from_value(value.get("thumbnailUrl")));
+    let media = image_url.map(|url| PinterestMedia {
+        media_type: Some("image".to_string()),
+        images: BTreeMap::from([(
+            "public_profile".to_string(),
+            PinterestImage {
+                url: Some(url),
+                width: None,
+                height: None,
+                extra: Map::new(),
+            },
+        )]),
+        url: None,
+        extra: Map::new(),
+    });
+    let mut extra = Map::new();
+    if let Some(author) = author_name(value.get("author")) {
+        extra.insert("public_author".to_string(), Value::String(author));
+    }
+
+    Some(SavedPin {
+        pin: PinterestPin {
+            id,
+            title: string_field(value, "headline").or_else(|| string_field(value, "name")),
+            description: string_field(value, "description"),
+            link: None,
+            created_at: string_field(value, "datePublished"),
+            board_id: None,
+            board_section_id: None,
+            board_owner: None,
+            parent_pin_id: None,
+            alt_text: None,
+            creative_type: Some("public_profile_json_ld".to_string()),
+            media,
+            extra,
+        },
+        board: None,
+        section: None,
+    })
+}
+
+fn string_field(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn nested_string_field(value: &Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn image_url_from_value(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    match value {
+        Value::String(url) => clean_string(url),
+        Value::Object(_) => string_field(value, "url")
+            .or_else(|| string_field(value, "contentUrl"))
+            .or_else(|| string_field(value, "thumbnailUrl")),
+        Value::Array(values) => values
+            .iter()
+            .find_map(|value| image_url_from_value(Some(value))),
+        _ => None,
+    }
+}
+
+fn author_name(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    match value {
+        Value::String(name) => clean_string(name),
+        Value::Object(_) => string_field(value, "name")
+            .or_else(|| string_field(value, "alternateName"))
+            .or_else(|| string_field(value, "url")),
+        Value::Array(values) => values.iter().find_map(|value| author_name(Some(value))),
+        _ => None,
+    }
+}
+
+fn clean_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn extract_pin_id_from_url(url: &str) -> Option<String> {
+    let marker = "/pin/";
+    let after_pin = url
+        .find(marker)
+        .map(|index| &url[index + marker.len()..])
+        .unwrap_or(url);
+    let segment = after_pin.split(['/', '?', '#']).next().unwrap_or(after_pin);
+    let mut current = String::new();
+    let mut last = None;
+
+    for character in segment.chars() {
+        if character.is_ascii_digit() {
+            current.push(character);
+        } else if !current.is_empty() {
+            last = Some(std::mem::take(&mut current));
+        }
+    }
+
+    if !current.is_empty() {
+        last = Some(current);
+    }
+
+    last
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,5 +728,62 @@ mod tests {
         };
 
         assert_eq!(pin.best_image_url(), Some("https://example.com/l.jpg"));
+    }
+
+    #[test]
+    fn extracts_pin_id_from_plain_and_slug_urls() {
+        assert_eq!(
+            extract_pin_id_from_url("https://www.pinterest.com/pin/332633122505892666/"),
+            Some("332633122505892666".to_string())
+        );
+        assert_eq!(
+            extract_pin_id_from_url(
+                "https://uk.pinterest.com/pin/example-title-with-90s--218213544442262202/"
+            ),
+            Some("218213544442262202".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_public_profile_json_ld_pins() {
+        let html = r#"
+            <html>
+              <script data-test-id="profile-snippet" type="application/ld+json">
+                {
+                  "@context": "https://schema.org/",
+                  "@type": "ProfilePage",
+                  "hasPart": [
+                    {
+                      "@type": "SocialMediaPosting",
+                      "author": {"@type": "Person", "name": "example-author"},
+                      "headline": "Example pin title",
+                      "description": "Example description",
+                      "image": "https://i.pinimg.com/736x/example.jpg",
+                      "url": "https://www.pinterest.com/pin/example-title--123456789/",
+                      "datePublished": "2026-06-14T20:32:17.000Z"
+                    }
+                  ]
+                }
+              </script>
+            </html>
+        "#;
+
+        let pins = parse_public_profile_html(html).unwrap();
+
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].pin.id, "123456789");
+        assert_eq!(pins[0].pin.title.as_deref(), Some("Example pin title"));
+        assert_eq!(
+            pins[0].pin.best_image_url(),
+            Some("https://i.pinimg.com/736x/example.jpg")
+        );
+        assert_eq!(
+            pins[0]
+                .pin
+                .extra
+                .get("public_author")
+                .and_then(Value::as_str),
+            Some("example-author")
+        );
     }
 }

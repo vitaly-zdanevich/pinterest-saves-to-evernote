@@ -15,6 +15,7 @@ pub struct Settings {
     pub pinterest_client_id: Option<String>,
     pub pinterest_client_secret: Option<String>,
     pub pinterest_refresh_token: Option<String>,
+    pub public_profile_to_parse_without_api: Option<String>,
     pub pinterest_token_scope: String,
     pub pinterest_api_base_url: String,
     pub pinterest_board_ids: Vec<String>,
@@ -40,10 +41,15 @@ impl Settings {
         let pinterest_client_id = optional_env("PINTEREST_CLIENT_ID");
         let pinterest_client_secret = optional_env("PINTEREST_CLIENT_SECRET");
         let pinterest_refresh_token = optional_env("PINTEREST_REFRESH_TOKEN");
+        let public_profile_to_parse_without_api =
+            optional_env("PUBLIC_PROFILE_TO_PARSE_WITHOUT_API");
 
-        if pinterest_access_token.is_none() && pinterest_refresh_token.is_none() {
+        if public_profile_to_parse_without_api.is_none()
+            && pinterest_access_token.is_none()
+            && pinterest_refresh_token.is_none()
+        {
             return Err(anyhow!(
-                "PINTEREST_ACCESS_TOKEN or PINTEREST_REFRESH_TOKEN is required"
+                "PINTEREST_ACCESS_TOKEN, PINTEREST_REFRESH_TOKEN, or PUBLIC_PROFILE_TO_PARSE_WITHOUT_API is required"
             ));
         }
         if pinterest_refresh_token.is_some()
@@ -78,6 +84,7 @@ impl Settings {
             pinterest_client_id,
             pinterest_client_secret,
             pinterest_refresh_token,
+            public_profile_to_parse_without_api,
             pinterest_token_scope: env_or("PINTEREST_TOKEN_SCOPE", "boards:read,pins:read"),
             pinterest_api_base_url: env_or(
                 "PINTEREST_API_BASE_URL",

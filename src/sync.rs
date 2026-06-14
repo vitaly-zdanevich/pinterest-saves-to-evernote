@@ -6,14 +6,20 @@ use crate::config::Settings;
 use crate::evernote_client::EvernoteClient;
 use crate::image::ImageDownloader;
 use crate::note;
-use crate::pinterest::{PinterestClient, SavedPin, resolve_access_token};
+use crate::pinterest::{
+    PinterestClient, SavedPin, public_profile_saved_pins, resolve_access_token,
+};
 use crate::state::State;
 
 pub async fn run(settings: Settings) -> Result<()> {
     let mut state = State::load(&settings.state_path)?;
-    let access_token = resolve_access_token(&settings).await?;
-    let pinterest = PinterestClient::new(&settings, access_token)?;
-    let mut saved_pins = pinterest.saved_pins(&settings).await?;
+    let mut saved_pins = if settings.public_profile_to_parse_without_api.is_some() {
+        public_profile_saved_pins(&settings).await?
+    } else {
+        let access_token = resolve_access_token(&settings).await?;
+        let pinterest = PinterestClient::new(&settings, access_token)?;
+        pinterest.saved_pins(&settings).await?
+    };
 
     saved_pins.sort_by(|left, right| {
         left.pin

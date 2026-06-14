@@ -1,4 +1,5 @@
 use html_escape::{encode_double_quoted_attribute, encode_safe};
+use serde_json::{Map, Value};
 
 use crate::image::DownloadedImage;
 use crate::pinterest::SavedPin;
@@ -37,6 +38,10 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
             .as_ref()
             .and_then(|owner| owner.username.as_deref()),
     );
+    let public_author = field(
+        "Pinterest author",
+        extra_string(&saved.pin.extra, "public_author"),
+    );
     let creative_type = field("Creative type", saved.pin.creative_type.as_deref());
     let parent_pin = field("Parent pin ID", saved.pin.parent_pin_id.as_deref());
     let image_url = saved.pin.best_image_url();
@@ -67,6 +72,7 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
 {board}
 {section}
 {owner}
+{public_author}
 {creative_type}
 {parent_pin}
 {pin_link}
@@ -75,6 +81,10 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
 </en-note>"#,
         pin_id = encode_safe(&saved.pin.id)
     )
+}
+
+fn extra_string<'a>(extra: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
+    extra.get(key).and_then(Value::as_str)
 }
 
 fn field(label: &str, value: Option<&str>) -> String {

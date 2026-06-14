@@ -2,8 +2,8 @@ name: Pinterest Saves to Evernote
 
 on:
   schedule:
-    # Daily at 03:17 UTC.
-    - cron: "17 3 * * *"
+    # Every 10 minutes. The public-profile fallback only exposes a small recent window.
+    - cron: "*/10 * * * *"
   workflow_dispatch:
   push:
     branches:
@@ -82,6 +82,7 @@ jobs:
           PINTEREST_CLIENT_SECRET: ${{ secrets.PINTEREST_CLIENT_SECRET }}
           PINTEREST_REFRESH_TOKEN: ${{ secrets.PINTEREST_REFRESH_TOKEN }}
           PINTEREST_ACCESS_TOKEN: ${{ secrets.PINTEREST_ACCESS_TOKEN }}
+          PUBLIC_PROFILE_TO_PARSE_WITHOUT_API: ${{ vars.PUBLIC_PROFILE_TO_PARSE_WITHOUT_API }}
           EVERNOTE_AUTH_TOKEN: ${{ secrets.EVERNOTE_AUTH_TOKEN }}
           EVERNOTE_NOTE_STORE_URL: ${{ secrets.EVERNOTE_NOTE_STORE_URL }}
           EVERNOTE_NOTEBOOK_GUID: ${{ secrets.EVERNOTE_NOTEBOOK_GUID }}
