@@ -50,16 +50,17 @@ Unsupported public-profile fallback while waiting for Pinterest API verification
 - This currently exposes a small recent list, about 10 public pins, with pin title, image URL, Pinterest URL, original Pinterest author, and `datePublished`. It does not expose comments, private/secret boards, full board metadata, or the original source link.
 - This is fragile and unsupported by Pinterest; keep the API credentials as the preferred long-term path.
 
-Optional Evernote variables:
+Optional Evernote secrets:
 
 - `EVERNOTE_NOTE_STORE_URL`: if omitted, the tool resolves it through Evernote UserStore.
-- `EVERNOTE_NOTEBOOK_GUID`: target notebook GUID. If omitted, Evernote uses the default notebook.
+- `EVERNOTE_NOTEBOOK_GUID`: target notebook GUID. Use this only if notebook-name lookup is ambiguous.
 
-These optional Evernote values can be stored as GitHub Actions secrets too.
+Leave `EVERNOTE_NOTEBOOK_GUID` unset when using `EVERNOTE_NOTEBOOK_NAME`.
 
 ## Optional GitHub Variables
 
 - `EVERNOTE_TAGS`: comma-separated tags. Defaults to `pinterest`.
+- `EVERNOTE_NOTEBOOK_NAME`: target Evernote notebook name. If omitted, Evernote uses the default notebook. Do not set it together with `EVERNOTE_NOTEBOOK_GUID`.
 
 Optional Pinterest behavior:
 

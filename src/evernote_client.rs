@@ -69,7 +69,8 @@ where
     token: String,
     user_store_url: String,
     note_store_url: Arc<Mutex<Option<String>>>,
-    notebook_guid: Option<String>,
+    notebook_guid: Arc<Mutex<Option<String>>>,
+    notebook_name: Option<String>,
     tags: Vec<String>,
     http: C,
 }
@@ -80,6 +81,7 @@ impl EvernoteClient<ReqwestThriftHttpClient> {
         user_store_url: Option<String>,
         note_store_url: Option<String>,
         notebook_guid: Option<String>,
+        notebook_name: Option<String>,
         tags: Vec<String>,
     ) -> Result<Self> {
         Ok(Self::with_http_client(
@@ -87,6 +89,7 @@ impl EvernoteClient<ReqwestThriftHttpClient> {
             user_store_url.unwrap_or_else(|| DEFAULT_USER_STORE_URL.to_string()),
             note_store_url,
             notebook_guid,
+            notebook_name,
             tags,
             ReqwestThriftHttpClient::new()?,
         ))
@@ -102,6 +105,7 @@ where
         user_store_url: impl Into<String>,
         note_store_url: Option<String>,
         notebook_guid: Option<String>,
+        notebook_name: Option<String>,
         tags: Vec<String>,
         http: C,
     ) -> Self {
@@ -109,7 +113,8 @@ where
             token: token.into(),
             user_store_url: user_store_url.into(),
             note_store_url: Arc::new(Mutex::new(note_store_url)),
-            notebook_guid,
+            notebook_guid: Arc::new(Mutex::new(notebook_guid)),
+            notebook_name,
             tags,
             http,
         }
@@ -122,6 +127,7 @@ where
         image: Option<&DownloadedImage>,
         source_url: String,
     ) -> Result<String> {
+        let notebook_guid = self.target_notebook_guid()?;
         let mut client = self.note_store_client()?;
         let resources = image
             .map(|image| vec![image_resource(image)])
@@ -129,7 +135,7 @@ where
         let note = types::Note {
             title: Some(title),
             content: Some(content),
-            notebook_guid: self.notebook_guid.clone(),
+            notebook_guid,
             resources,
             attributes: Some(NoteAttributes {
                 source: Some("pinterest".to_string()),
@@ -148,6 +154,64 @@ where
         created
             .guid
             .context("Evernote did not return a GUID for the created note")
+    }
+
+    fn target_notebook_guid(&self) -> Result<Option<String>> {
+        if let Some(guid) = self
+            .notebook_guid
+            .lock()
+            .map_err(|_| anyhow!("Evernote notebook GUID cache is poisoned"))?
+            .clone()
+        {
+            return Ok(Some(guid));
+        }
+
+        let Some(notebook_name) = self.notebook_name.as_deref() else {
+            return Ok(None);
+        };
+        let wanted = normalize_notebook_name(notebook_name);
+        if wanted.is_empty() {
+            return Ok(None);
+        }
+
+        let mut client = self.note_store_client()?;
+        let notebooks = client
+            .list_notebooks(self.token.clone())
+            .map_err(|error| anyhow!("Evernote API error while listing notebooks: {error}"))?;
+
+        let mut matches = notebooks
+            .into_iter()
+            .filter(|notebook| {
+                notebook
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| normalize_notebook_name(name) == wanted)
+            })
+            .collect::<Vec<_>>();
+
+        match matches.len() {
+            0 => Err(anyhow!(
+                "Evernote notebook named {notebook_name:?} was not found"
+            )),
+            1 => {
+                let guid = matches
+                    .pop()
+                    .and_then(|notebook| notebook.guid)
+                    .filter(|guid| !guid.trim().is_empty())
+                    .ok_or_else(|| {
+                        anyhow!("Evernote notebook named {notebook_name:?} has no GUID")
+                    })?;
+                *self
+                    .notebook_guid
+                    .lock()
+                    .map_err(|_| anyhow!("Evernote notebook GUID cache is poisoned"))? =
+                    Some(guid.clone());
+                Ok(Some(guid))
+            }
+            count => Err(anyhow!(
+                "Evernote notebook name {notebook_name:?} matched {count} notebooks; use EVERNOTE_NOTEBOOK_GUID instead"
+            )),
+        }
     }
 
     fn user_store_client(
@@ -214,6 +278,10 @@ where
             Some(note_store_url.clone());
         Ok(note_store_url)
     }
+}
+
+fn normalize_notebook_name(name: &str) -> String {
+    name.trim().to_lowercase()
 }
 
 fn image_resource(image: &DownloadedImage) -> types::Resource {
@@ -333,5 +401,16 @@ where
         state.read_bytes = response_body;
         state.read_pos = 0;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_notebook_names_for_lookup() {
+        assert_eq!(normalize_notebook_name(" Pinterest "), "pinterest");
+        assert_eq!(normalize_notebook_name("PiNtErEsT"), "pinterest");
     }
 }

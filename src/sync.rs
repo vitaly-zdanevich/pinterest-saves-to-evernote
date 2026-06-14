@@ -75,6 +75,7 @@ pub async fn run(settings: Settings) -> Result<()> {
             Some(settings.evernote_user_store_url.clone()),
             settings.evernote_note_store_url.clone(),
             settings.evernote_notebook_guid.clone(),
+            settings.evernote_notebook_name.clone(),
             settings.evernote_tags.clone(),
         )?)
     };

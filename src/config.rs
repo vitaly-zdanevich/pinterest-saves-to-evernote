@@ -25,6 +25,7 @@ pub struct Settings {
     pub evernote_note_store_url: Option<String>,
     pub evernote_user_store_url: String,
     pub evernote_notebook_guid: Option<String>,
+    pub evernote_notebook_name: Option<String>,
     pub evernote_tags: Vec<String>,
     pub state_path: PathBuf,
     pub dry_run: bool,
@@ -63,6 +64,13 @@ impl Settings {
         let evernote_auth_token = optional_env("EVERNOTE_AUTH_TOKEN")
             .or_else(|| optional_env("EVERNOTE_TOKEN"))
             .ok_or_else(|| anyhow!("EVERNOTE_AUTH_TOKEN or EVERNOTE_TOKEN is required"))?;
+        let evernote_notebook_guid = optional_env("EVERNOTE_NOTEBOOK_GUID");
+        let evernote_notebook_name = optional_env("EVERNOTE_NOTEBOOK_NAME");
+        if evernote_notebook_guid.is_some() && evernote_notebook_name.is_some() {
+            return Err(anyhow!(
+                "set only one of EVERNOTE_NOTEBOOK_GUID or EVERNOTE_NOTEBOOK_NAME"
+            ));
+        }
 
         let max_pins_per_run = parse_usize_env("MAX_PINS_PER_RUN", 25)?;
         if max_pins_per_run == 0 {
@@ -99,7 +107,8 @@ impl Settings {
                 "EVERNOTE_USER_STORE_URL",
                 "https://www.evernote.com/edam/user",
             ),
-            evernote_notebook_guid: optional_env("EVERNOTE_NOTEBOOK_GUID"),
+            evernote_notebook_guid,
+            evernote_notebook_name,
             evernote_tags: parse_tags(&env_or("EVERNOTE_TAGS", "pinterest")),
             state_path: PathBuf::from(env_or("STATE_PATH", "state/state.json")),
             dry_run: parse_bool_env("DRY_RUN", false)?,
