@@ -26,7 +26,6 @@ pub fn title_hashtags(saved: &SavedPin) -> Vec<String> {
 pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
     let description = multiline_field("Description", saved.pin.description.as_deref());
     let alt_text = multiline_field("Alt text", saved.pin.alt_text.as_deref());
-    let created_at = field("Created at", saved.pin.created_at.as_deref());
     let section = saved
         .section
         .as_ref()
@@ -57,7 +56,6 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
 {image_markup}
 {description}
 {alt_text}
-{created_at}
 {board}
 {section}
 {public_author}
@@ -508,6 +506,7 @@ mod tests {
         assert!(!enml.contains("Pinterest pin"));
         assert!(!enml.contains("Board owner"));
         assert!(!enml.contains("<b>Title:</b>"));
+        assert!(!enml.contains("<b>Created at:</b>"));
         assert!(!enml.contains("Creative type"));
         assert!(!enml.contains("A &lt; B"));
         assert!(enml.contains("Line &amp; 2"));
