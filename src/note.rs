@@ -62,7 +62,6 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
 <!DOCTYPE en-note SYSTEM "http://xml.evernote.com/pub/enml2.dtd">
 <en-note>
 {image_markup}
-<div><b>Pin ID:</b> {pin_id}</div>
 {title}
 {description}
 {alt_text}
@@ -77,8 +76,7 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
 {pin_link}
 {source_link}
 {image_url_row}
-</en-note>"#,
-        pin_id = encode_safe(&saved.pin.id)
+</en-note>"#
     )
 }
 
@@ -291,6 +289,7 @@ mod tests {
 
         let enml = enml(&saved, None);
 
+        assert!(!enml.contains("Pin ID"));
         assert!(enml.contains("A &lt; B"));
         assert!(enml.contains("Line &amp; 2"));
         assert!(enml.contains("https://example.com/?a=1&amp;b=2"));
