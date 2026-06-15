@@ -139,7 +139,7 @@ fn comments_section(extra: &Map<String, Value>) -> String {
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-    if total_count.is_none() && comments.is_empty() {
+    if comments.is_empty() && total_count.unwrap_or(0) == 0 {
         return String::new();
     }
 
@@ -425,6 +425,19 @@ mod tests {
         assert!(!enml.contains("#olderbrothercore"));
         assert!(!enml.contains("#olderbrother"));
         assert!(!enml.contains("#nostalgia"));
+    }
+
+    #[test]
+    fn omits_zero_comment_count() {
+        let mut saved = saved_pin_with_title("No comments");
+        saved
+            .pin
+            .extra
+            .insert("public_comment_count".to_string(), Value::from(0));
+
+        let enml = enml(&saved, None);
+
+        assert!(!enml.contains("Pinterest comments"));
     }
 
     #[test]
