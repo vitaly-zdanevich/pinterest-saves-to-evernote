@@ -8,6 +8,7 @@
 [![Vulnerabilities](https://sonarcloud.io/api/project_badges/measure?project=vitaly-zdanevich_pinterest-saves-to-evernote&metric=vulnerabilities)](https://sonarcloud.io/summary/new_code?id=vitaly-zdanevich_pinterest-saves-to-evernote)
 [![Code Smells](https://sonarcloud.io/api/project_badges/measure?project=vitaly-zdanevich_pinterest-saves-to-evernote&metric=code_smells)](https://sonarcloud.io/summary/new_code?id=vitaly-zdanevich_pinterest-saves-to-evernote)
 [![Coverage](https://sonarcloud.io/api/project_badges/measure?project=vitaly-zdanevich_pinterest-saves-to-evernote&metric=coverage)](https://sonarcloud.io/summary/new_code?id=vitaly-zdanevich_pinterest-saves-to-evernote)
+[![Lines of Code](https://sonarcloud.io/api/project_badges/measure?project=vitaly-zdanevich_pinterest-saves-to-evernote&metric=ncloc)](https://sonarcloud.io/summary/new_code?id=vitaly-zdanevich_pinterest-saves-to-evernote)
 
 Rust CLI for a scheduled GitHub Actions job that exports newly saved Pinterest pins to Evernote.
 
