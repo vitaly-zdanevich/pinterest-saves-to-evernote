@@ -1538,6 +1538,221 @@ mod tests {
     }
 
     #[test]
+    fn builds_api_and_public_profile_urls() {
+        assert_eq!(
+            endpoint("https://api.pinterest.com/v5/", "pins")
+                .unwrap()
+                .as_str(),
+            "https://api.pinterest.com/v5/pins"
+        );
+        assert_eq!(
+            endpoint("https://api.pinterest.com/v5", "/boards")
+                .unwrap()
+                .as_str(),
+            "https://api.pinterest.com/v5/boards"
+        );
+        assert_eq!(
+            public_profile_url("vitalyzdanevich").unwrap().as_str(),
+            "https://www.pinterest.com/vitalyzdanevich/pins/"
+        );
+        assert_eq!(
+            public_profile_url("vitalyzdanevich/pins").unwrap().as_str(),
+            "https://www.pinterest.com/vitalyzdanevich/pins/"
+        );
+        assert!(public_profile_url("  ").is_err());
+        assert!(public_profile_url("https://[").is_err());
+    }
+
+    #[test]
+    fn extracts_public_profile_username_from_url() {
+        let url = Url::parse("https://www.pinterest.com/vitalyzdanevich/pins/").unwrap();
+        assert_eq!(
+            public_profile_username(&url),
+            Some("vitalyzdanevich".to_string())
+        );
+
+        let root = Url::parse("https://www.pinterest.com/").unwrap();
+        assert_eq!(public_profile_username(&root), None);
+    }
+
+    #[test]
+    fn parses_public_profile_response_errors() {
+        let missing_response = serde_json::json!({});
+        assert!(
+            parse_public_profile_pin_page_response(&missing_response)
+                .expect_err("missing resource_response")
+                .to_string()
+                .contains("no resource_response")
+        );
+
+        let error_response = serde_json::json!({
+            "resource_response": {
+                "error": {"message_detail": "private profile"}
+            }
+        });
+        assert!(
+            parse_public_profile_pin_page_response(&error_response)
+                .expect_err("resource error")
+                .to_string()
+                .contains("private profile")
+        );
+
+        let missing_data = serde_json::json!({"resource_response": {"data": {}}});
+        assert!(
+            parse_public_profile_pin_page_response(&missing_data)
+                .expect_err("missing data array")
+                .to_string()
+                .contains("no data array")
+        );
+    }
+
+    #[test]
+    fn parses_public_profile_resource_pin_fallback_fields() {
+        let value = serde_json::json!({
+            "id": "333",
+            "title": "Fallback title",
+            "tracked_link": "https://example.com/tracked",
+            "auto_alt_text": "Generated alt",
+            "created_at": "not a date",
+            "board": {"id": "board-2"},
+            "native_creator": {"username": "native_author"},
+            "link_domain": "example.com",
+            "pin_join": {"canonical_pin_id": "parent-1"},
+            "images": {
+                "bad": {"width": 100, "height": 100}
+            }
+        });
+
+        let saved = parse_public_profile_resource_pin(&value).expect("public pin");
+
+        assert_eq!(saved.pin.id, "333");
+        assert_eq!(saved.pin.title.as_deref(), Some("Fallback title"));
+        assert_eq!(
+            saved.pin.link.as_deref(),
+            Some("https://example.com/tracked")
+        );
+        assert_eq!(saved.pin.alt_text.as_deref(), Some("Generated alt"));
+        assert_eq!(saved.pin.created_at.as_deref(), Some("not a date"));
+        assert_eq!(saved.pin.board_id.as_deref(), Some("board-2"));
+        assert_eq!(saved.pin.parent_pin_id.as_deref(), Some("parent-1"));
+        assert!(saved.pin.media.is_none());
+        assert_eq!(
+            saved.pin.extra.get("public_author").and_then(Value::as_str),
+            Some("native_author")
+        );
+        assert_eq!(
+            saved
+                .pin
+                .extra
+                .get("public_source_domain")
+                .and_then(Value::as_str),
+            Some("example.com")
+        );
+    }
+
+    #[test]
+    fn extracts_balanced_json_objects_from_javascript() {
+        let raw = r#"{"text":"brace } inside string","nested":{"escaped":"quote \" ok"}} trailing"#;
+
+        assert_eq!(
+            json_object_prefix(raw),
+            Some(r#"{"text":"brace } inside string","nested":{"escaped":"quote \" ok"}}"#)
+        );
+        assert_eq!(json_object_prefix("[]"), None);
+        assert_eq!(json_object_prefix(r#"{"unfinished": true"#), None);
+    }
+
+    #[test]
+    fn extracts_cookie_header_from_set_cookie_headers() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            SET_COOKIE,
+            HeaderValue::from_static("csrftoken=abc; Path=/; Secure"),
+        );
+        headers.append(
+            SET_COOKIE,
+            HeaderValue::from_static("session=def; HttpOnly"),
+        );
+
+        let cookie = response_cookie_header(&headers).expect("cookie header");
+
+        assert_eq!(cookie.to_str().unwrap(), "csrftoken=abc; session=def");
+    }
+
+    #[test]
+    fn extracts_json_ld_image_urls_and_authors() {
+        let image = serde_json::json!([
+            {"contentUrl": "https://example.com/content.jpg"},
+            "https://example.com/fallback.jpg"
+        ]);
+        let author = serde_json::json!([
+            {"alternateName": "@author"},
+            {"name": "Author Name"}
+        ]);
+
+        assert_eq!(
+            image_url_from_value(Some(&image)).as_deref(),
+            Some("https://example.com/content.jpg")
+        );
+        assert_eq!(author_name(Some(&author)).as_deref(), Some("@author"));
+        assert_eq!(image_url_from_value(Some(&Value::Null)), None);
+        assert_eq!(author_name(Some(&Value::Bool(true))), None);
+    }
+
+    #[test]
+    fn public_pin_comments_are_limited_and_errors_are_reported() {
+        let response = serde_json::json!({
+            "resource_response": {
+                "status": "success",
+                "data": [
+                    {"id": "comment-1", "text": "One"},
+                    {"id": "comment-2", "text": "Two"}
+                ]
+            }
+        });
+
+        let comments = parse_public_pin_comments_response(&response, 1).unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].id.as_deref(), Some("comment-1"));
+
+        let error_response = serde_json::json!({
+            "resource_response": {
+                "error": {"message": "comments disabled"}
+            }
+        });
+        assert!(
+            parse_public_pin_comments_response(&error_response, 10)
+                .expect_err("comments error")
+                .to_string()
+                .contains("comments disabled")
+        );
+
+        let missing_data = serde_json::json!({"resource_response": {}});
+        assert!(
+            parse_public_pin_comments_response(&missing_data, 10)
+                .expect_err("missing comments data")
+                .to_string()
+                .contains("no data array")
+        );
+    }
+
+    #[test]
+    fn attaches_public_comments_to_extra_only_when_present() {
+        let mut extra = Map::new();
+        PublicPinComments {
+            total_count: Some(0),
+            comments: Vec::new(),
+        }
+        .attach_to_extra(&mut extra);
+
+        assert_eq!(
+            extra.get("public_comment_count").and_then(Value::as_u64),
+            Some(0)
+        );
+        assert!(extra.get("public_comments").is_none());
+    }
+
+    #[test]
     fn parses_aggregated_pin_data_from_public_pin_html() {
         let html = r#"
             <script>

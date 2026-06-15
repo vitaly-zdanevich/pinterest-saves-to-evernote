@@ -380,10 +380,12 @@ fn truncate_title(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use serde_json::{Map, Value};
 
     use super::*;
-    use crate::pinterest::{PinterestBoard, PinterestPin};
+    use crate::pinterest::{PinterestBoard, PinterestBoardSection, PinterestMedia, PinterestPin};
 
     fn saved_pin_with_title(title: &str) -> SavedPin {
         SavedPin {
@@ -434,6 +436,17 @@ mod tests {
     }
 
     #[test]
+    fn title_falls_back_and_truncates() {
+        assert_eq!(title(&saved_pin_with_title("#tag | ---")), "Pinterest pin");
+
+        let long_title = "a".repeat(300);
+        let title = title(&saved_pin_with_title(&long_title));
+
+        assert_eq!(title.chars().count(), 250);
+        assert!(title.ends_with("..."));
+    }
+
+    #[test]
     fn omits_zero_comment_count() {
         let mut saved = saved_pin_with_title("No comments");
         saved
@@ -468,6 +481,103 @@ mod tests {
         assert!(row.contains("Thu, 21 Nov 2024 18:26:37 +0000"));
         assert!(!row.contains("123456789"));
         assert!(!row.contains("Pinterest user"));
+    }
+
+    #[test]
+    fn renders_comment_summary_and_full_name_author() {
+        let mut extra = Map::new();
+        extra.insert("public_comment_count".to_string(), Value::from(3));
+        extra.insert(
+            "public_comments".to_string(),
+            Value::Array(vec![Value::Object({
+                let mut comment = Map::new();
+                comment.insert(
+                    "text".to_string(),
+                    Value::String(" Line 1 <tag>\nLine 2 ".to_string()),
+                );
+                comment.insert(
+                    "user_full_name".to_string(),
+                    Value::String("Full <Name>".to_string()),
+                );
+                comment.insert(
+                    "user_url".to_string(),
+                    Value::String("/full-name/".to_string()),
+                );
+                comment
+            })]),
+        );
+
+        let markup = comments_section(&extra);
+
+        assert!(markup.contains("1 scraped of 3"));
+        assert!(markup.contains("Line 1 &lt;tag&gt;<br/>Line 2"));
+        assert!(markup.contains("Full &lt;Name&gt;"));
+        assert!(markup.contains("https://www.pinterest.com/full-name/"));
+    }
+
+    #[test]
+    fn ignores_empty_comments() {
+        let mut comment = Map::new();
+        comment.insert("text".to_string(), Value::String("   ".to_string()));
+
+        assert!(comment_row(&comment).is_none());
+    }
+
+    #[test]
+    fn rejects_invalid_pinterest_profile_usernames() {
+        assert_eq!(
+            pinterest_profile_url_for_username("valid_user").as_deref(),
+            Some("https://www.pinterest.com/valid_user/")
+        );
+        assert!(pinterest_profile_url_for_username("bad/user").is_none());
+        assert!(pinterest_profile_url_for_username("bad?user").is_none());
+        assert!(pinterest_profile_url_for_username("bad#user").is_none());
+    }
+
+    #[test]
+    fn renders_image_media_and_section_id() {
+        let saved = SavedPin {
+            pin: PinterestPin {
+                id: "123".to_string(),
+                title: Some("Image pin".to_string()),
+                description: None,
+                link: None,
+                created_at: None,
+                board_id: None,
+                board_section_id: Some("section-1".to_string()),
+                board_owner: None,
+                parent_pin_id: None,
+                alt_text: None,
+                creative_type: None,
+                media: Some(PinterestMedia {
+                    media_type: Some("image".to_string()),
+                    images: BTreeMap::new(),
+                    url: Some("https://i.pinimg.com/originals/example.jpg".to_string()),
+                    extra: Map::new(),
+                }),
+                extra: Map::new(),
+            },
+            board: None,
+            section: Some(PinterestBoardSection {
+                id: "section-1".to_string(),
+                name: None,
+                extra: Map::new(),
+            }),
+        };
+        let image = DownloadedImage {
+            source_url: "https://i.pinimg.com/originals/example.jpg".to_string(),
+            bytes: vec![1, 2, 3],
+            mime_type: "image/jpeg".to_string(),
+            hash: vec![0xab, 0xcd],
+            hash_hex: "abcd".to_string(),
+            file_name: "example.jpg".to_string(),
+        };
+
+        let enml = enml(&saved, Some(&image));
+
+        assert!(enml.contains("<en-media type=\"image/jpeg\" hash=\"abcd\" />"));
+        assert!(enml.contains("<b>Section:</b> section-1"));
+        assert!(enml.contains("https://i.pinimg.com/originals/example.jpg"));
     }
 
     #[test]

@@ -215,7 +215,44 @@ fn env_or(name: &str, default: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+
+    fn settings_with_refresh_parts(
+        client_id: Option<&str>,
+        client_secret: Option<&str>,
+        refresh_token: Option<&str>,
+    ) -> Settings {
+        Settings {
+            pinterest_access_token: None,
+            pinterest_client_id: client_id.map(ToOwned::to_owned),
+            pinterest_client_secret: client_secret.map(ToOwned::to_owned),
+            pinterest_refresh_token: refresh_token.map(ToOwned::to_owned),
+            public_profile_to_parse_without_api: None,
+            public_profile_max_pages: 3,
+            pinterest_token_scope: "boards:read,pins:read".to_string(),
+            pinterest_api_base_url: "https://api.pinterest.com/v5".to_string(),
+            pinterest_board_ids: Vec::new(),
+            pinterest_fetch_mode: PinterestFetchMode::Boards,
+            pinterest_include_sections: true,
+            evernote_auth_token: "evernote-token".to_string(),
+            evernote_note_store_url: None,
+            evernote_user_store_url: "https://www.evernote.com/edam/user".to_string(),
+            evernote_notebook_guid: None,
+            evernote_notebook_name: None,
+            evernote_tags: vec!["pinterest".to_string()],
+            state_path: PathBuf::from("state/state.json"),
+            dry_run: false,
+            backfill_existing: false,
+            max_pins_per_run: 25,
+            page_size: 100,
+            attach_images: true,
+            max_image_bytes: 25 * 1024 * 1024,
+            scrape_pin_comments: true,
+            max_pin_comments: 25,
+        }
+    }
 
     #[test]
     fn parses_comma_and_space_lists() {
@@ -236,5 +273,59 @@ mod tests {
         assert!(parse_bool("YES").unwrap());
         assert!(!parse_bool("0").unwrap());
         assert!(parse_bool("maybe").is_err());
+    }
+
+    #[test]
+    fn parses_fetch_modes() {
+        assert_eq!(
+            parse_fetch_mode("boards").unwrap(),
+            PinterestFetchMode::Boards
+        );
+        assert_eq!(
+            parse_fetch_mode(" board ").unwrap(),
+            PinterestFetchMode::Boards
+        );
+        assert_eq!(
+            parse_fetch_mode("account").unwrap(),
+            PinterestFetchMode::Account
+        );
+        assert_eq!(
+            parse_fetch_mode("pins").unwrap(),
+            PinterestFetchMode::Account
+        );
+        assert!(parse_fetch_mode("profile").is_err());
+    }
+
+    #[test]
+    fn parses_tags_with_default() {
+        assert_eq!(parse_tags(""), vec!["pinterest".to_string()]);
+        assert_eq!(
+            parse_tags("pinterest, archive reference"),
+            vec![
+                "pinterest".to_string(),
+                "archive".to_string(),
+                "reference".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn refresh_token_mode_requires_all_oauth_parts() {
+        assert!(
+            settings_with_refresh_parts(Some("id"), Some("secret"), Some("refresh"))
+                .can_refresh_pinterest_token()
+        );
+        assert!(
+            !settings_with_refresh_parts(None, Some("secret"), Some("refresh"))
+                .can_refresh_pinterest_token()
+        );
+        assert!(
+            !settings_with_refresh_parts(Some("id"), None, Some("refresh"))
+                .can_refresh_pinterest_token()
+        );
+        assert!(
+            !settings_with_refresh_parts(Some("id"), Some("secret"), None)
+                .can_refresh_pinterest_token()
+        );
     }
 }

@@ -90,4 +90,45 @@ mod tests {
         assert!(!loaded.contains("pin-2"));
         assert!(loaded.is_initialized());
     }
+
+    #[test]
+    fn missing_state_file_loads_empty_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("missing/state.json");
+
+        let loaded = State::load(&path).expect("load missing state");
+
+        assert!(!loaded.is_initialized());
+        assert!(loaded.processed_pin_ids.is_empty());
+        assert!(loaded.initialized_at.is_none());
+        assert!(loaded.last_successful_sync_at.is_none());
+    }
+
+    #[test]
+    fn invalid_state_file_returns_parse_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        fs::write(&path, "{not json").expect("write invalid state");
+
+        let error = State::load(&path).expect_err("invalid state should fail");
+
+        assert!(error.to_string().contains("failed to parse state file"));
+    }
+
+    #[test]
+    fn save_creates_parent_directories() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested/state/state.json");
+        let mut state = State::default();
+        state.mark_processed("pin-1");
+
+        state.save(&path).expect("save nested state");
+
+        assert!(path.exists());
+        assert!(
+            State::load(&path)
+                .expect("load nested state")
+                .contains("pin-1")
+        );
+    }
 }

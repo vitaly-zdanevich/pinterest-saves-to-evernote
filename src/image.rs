@@ -144,6 +144,7 @@ mod tests {
             normalize_content_type("Image/JPEG; charset=binary"),
             "image/jpeg"
         );
+        assert_eq!(normalize_content_type(" image/PNG "), "image/png");
     }
 
     #[test]
@@ -160,5 +161,19 @@ mod tests {
             file_name_for("https://example.com/path/", "123", "image/png"),
             "pinterest-123.png"
         );
+        assert_eq!(
+            file_name_for("not a url", "123", "image/svg+xml"),
+            "pinterest-123.svg"
+        );
+    }
+
+    #[test]
+    fn maps_common_image_extensions() {
+        assert_eq!(extension_for_mime("image/png"), "png");
+        assert_eq!(extension_for_mime("image/gif"), "gif");
+        assert_eq!(extension_for_mime("image/webp"), "webp");
+        assert_eq!(extension_for_mime("image/bmp"), "bmp");
+        assert_eq!(extension_for_mime("image/svg+xml"), "svg");
+        assert_eq!(extension_for_mime("image/avif"), "jpg");
     }
 }

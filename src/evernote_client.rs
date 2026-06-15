@@ -421,11 +421,87 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+
+    #[derive(Clone)]
+    struct FakeThriftHttpClient {
+        calls: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+        response: Vec<u8>,
+    }
+
+    impl ThriftHttpClient for FakeThriftHttpClient {
+        fn post_thrift(&self, url: &str, body: Vec<u8>) -> Result<Vec<u8>, String> {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push((url.to_string(), body));
+            Ok(self.response.clone())
+        }
+    }
 
     #[test]
     fn normalizes_notebook_names_for_lookup() {
         assert_eq!(normalize_notebook_name(" Pinterest "), "pinterest");
         assert_eq!(normalize_notebook_name("PiNtErEsT"), "pinterest");
+    }
+
+    #[test]
+    fn thrift_http_channel_flushes_request_and_reads_response() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let http = FakeThriftHttpClient {
+            calls: calls.clone(),
+            response: b"response-body".to_vec(),
+        };
+        let mut channel = ThriftHttpChannel::new("https://evernote.example/edam".to_string(), http);
+
+        channel.write_all(b"request-body").expect("write request");
+        channel.flush().expect("flush request");
+
+        let calls = calls.lock().expect("calls lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "https://evernote.example/edam");
+        assert_eq!(calls[0].1, b"request-body");
+        drop(calls);
+
+        let mut first = [0_u8; 8];
+        let read = channel.read(&mut first).expect("read first chunk");
+        assert_eq!(read, 8);
+        assert_eq!(&first, b"response");
+
+        let mut second = Vec::new();
+        channel
+            .read_to_end(&mut second)
+            .expect("read remaining response");
+        assert_eq!(second, b"-body");
+    }
+
+    #[test]
+    fn image_resource_uses_downloaded_image_metadata() {
+        let image = DownloadedImage {
+            source_url: "https://i.pinimg.com/example.jpg".to_string(),
+            bytes: vec![1, 2, 3, 4],
+            mime_type: "image/jpeg".to_string(),
+            hash: vec![0xaa, 0xbb],
+            hash_hex: "aabb".to_string(),
+            file_name: "example.jpg".to_string(),
+        };
+
+        let resource = image_resource(&image);
+
+        let data = resource.data.expect("resource data");
+        assert_eq!(data.body_hash.as_deref(), Some(&[0xaa, 0xbb][..]));
+        assert_eq!(data.size, Some(4));
+        assert_eq!(data.body.as_deref(), Some(&[1, 2, 3, 4][..]));
+        assert_eq!(resource.mime.as_deref(), Some("image/jpeg"));
+        assert_eq!(resource.active, Some(true));
+        let attributes = resource.attributes.expect("resource attributes");
+        assert_eq!(
+            attributes.source_u_r_l.as_deref(),
+            Some("https://i.pinimg.com/example.jpg")
+        );
+        assert_eq!(attributes.file_name.as_deref(), Some("example.jpg"));
+        assert_eq!(attributes.attachment, Some(false));
     }
 }
