@@ -38,10 +38,7 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
             .as_ref()
             .and_then(|owner| owner.username.as_deref()),
     );
-    let public_author = field(
-        "Pinterest author",
-        extra_string(&saved.pin.extra, "public_author"),
-    );
+    let public_author = public_author_field(&saved.pin.extra);
     let public_comments = comments_section(&saved.pin.extra);
     let creative_type = field("Creative type", saved.pin.creative_type.as_deref());
     let parent_pin = field("Parent pin ID", saved.pin.parent_pin_id.as_deref());
@@ -87,6 +84,35 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
 
 fn extra_string<'a>(extra: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     extra.get(key).and_then(Value::as_str)
+}
+
+fn public_author_field(extra: &Map<String, Value>) -> String {
+    let author = extra_string(extra, "public_author");
+    let author_username = extra_string(extra, "public_author_username");
+    match (author, author_username) {
+        (Some(author), Some(username)) => match pinterest_profile_url_for_username(username) {
+            Some(url) => link_text_field("Pinterest author", &url, author),
+            None => field("Pinterest author", Some(author)),
+        },
+        (None, Some(username)) => match pinterest_profile_url_for_username(username) {
+            Some(url) => link_text_field("Pinterest author", &url, username),
+            None => field("Pinterest author", Some(username)),
+        },
+        _ => field("Pinterest author", author),
+    }
+}
+
+fn pinterest_profile_url_for_username(username: &str) -> Option<String> {
+    let username = username.trim().trim_start_matches('@').trim_matches('/');
+    if username.is_empty()
+        || username.contains('/')
+        || username.contains('?')
+        || username.contains('#')
+    {
+        return None;
+    }
+
+    Some(format!("https://www.pinterest.com/{username}/"))
 }
 
 fn comments_section(extra: &Map<String, Value>) -> String {
@@ -182,15 +208,17 @@ fn multiline_field(label: &str, value: Option<&str>) -> String {
 fn link_field(label: &str, url: Option<&str>) -> String {
     url.map(str::trim)
         .filter(|url| !url.is_empty())
-        .map(|url| {
-            let href = encode_double_quoted_attribute(url);
-            let text = encode_safe(url);
-            format!(
-                "<div><b>{}:</b> <a href=\"{href}\">{text}</a></div>",
-                encode_safe(label)
-            )
-        })
+        .map(|url| link_text_field(label, url, url))
         .unwrap_or_default()
+}
+
+fn link_text_field(label: &str, url: &str, text: &str) -> String {
+    let href = encode_double_quoted_attribute(url);
+    let text = encode_safe(text);
+    format!(
+        "<div><b>{}:</b> <a href=\"{href}\">{text}</a></div>",
+        encode_safe(label)
+    )
 }
 
 fn truncate_title(raw: &str) -> String {
@@ -215,6 +243,14 @@ mod tests {
     #[test]
     fn renders_enml_with_escaped_values() {
         let mut extra = Map::new();
+        extra.insert(
+            "public_author".to_string(),
+            Value::String("Author <Name>".to_string()),
+        );
+        extra.insert(
+            "public_author_username".to_string(),
+            Value::String("author_user".to_string()),
+        );
         extra.insert("public_comment_count".to_string(), Value::from(2));
         extra.insert(
             "public_comments".to_string(),
@@ -260,6 +296,8 @@ mod tests {
         assert!(enml.contains("https://example.com/?a=1&amp;b=2"));
         assert!(enml.contains("Alt &gt; text"));
         assert!(enml.contains("Ideas"));
+        assert!(enml.contains("Author &lt;Name&gt;"));
+        assert!(enml.contains("https://www.pinterest.com/author_user/"));
         assert!(enml.contains("Pinterest comments"));
         assert!(enml.contains("Nice &lt;pin&gt;"));
         assert!(enml.contains("Pinterest user user-1"));

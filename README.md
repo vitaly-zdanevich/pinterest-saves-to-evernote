@@ -46,8 +46,8 @@ Unsupported public-profile fallback while waiting for Pinterest API verification
 
 - Add a GitHub Actions variable named `PUBLIC_PROFILE_TO_PARSE_WITHOUT_API`.
 - Set it to your public Pinterest profile or pins URL, for example `https://www.pinterest.com/vitalyzdanevich/pins/`.
-- When this variable is set, the tool does not use Pinterest OAuth. It fetches the public profile HTML and parses the JSON-LD profile snippet instead.
-- This currently exposes a small recent list, about 10 public pins, with pin title, image URL, Pinterest URL, original Pinterest author, and `datePublished`. It does not expose private/secret boards, full board metadata, or the original source link.
+- When this variable is set, the tool does not use Pinterest OAuth. It fetches the public profile HTML, parses public pin data, and follows Pinterest's public bookmark pagination up to `PUBLIC_PROFILE_MAX_PAGES`.
+- This currently exposes recent public pins with pin title, description, image URL, Pinterest URL, original source link, board, original Pinterest author, and save time when Pinterest exposes those fields. Author names are linked to their Pinterest profile when a username is available. It does not expose private/secret boards.
 - By default, each new note also tries to scrape the public comments endpoint for that pin. When available, the note includes comment text, creation time, and the Pinterest user ID. Public responses currently do not include commenter display names.
 - This is fragile and unsupported by Pinterest; keep the API credentials as the preferred long-term path.
 
