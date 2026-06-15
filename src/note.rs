@@ -213,8 +213,7 @@ fn comment_author_markup(comment: &Map<String, Value>) -> Option<String> {
         }
     }
 
-    extra_string(comment, "user_id")
-        .map(|user_id| encode_safe(&format!("Pinterest user {user_id}")).to_string())
+    None
 }
 
 fn comment_user_url(comment: &Map<String, Value>) -> Option<String> {
@@ -434,6 +433,30 @@ mod tests {
         let enml = enml(&saved, None);
 
         assert!(!enml.contains("Pinterest comments"));
+    }
+
+    #[test]
+    fn omits_comment_user_id_when_username_is_missing() {
+        let mut comment = Map::new();
+        comment.insert(
+            "text".to_string(),
+            Value::String("No public username".to_string()),
+        );
+        comment.insert(
+            "user_id".to_string(),
+            Value::String("123456789".to_string()),
+        );
+        comment.insert(
+            "created_at".to_string(),
+            Value::String("Thu, 21 Nov 2024 18:26:37 +0000".to_string()),
+        );
+
+        let row = comment_row(&comment).expect("comment row");
+
+        assert!(row.contains("No public username"));
+        assert!(row.contains("Thu, 21 Nov 2024 18:26:37 +0000"));
+        assert!(!row.contains("123456789"));
+        assert!(!row.contains("Pinterest user"));
     }
 
     #[test]
