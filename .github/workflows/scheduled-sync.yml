@@ -66,6 +66,8 @@ jobs:
           MAX_PINS_PER_RUN: ${{ vars.MAX_PINS_PER_RUN }}
           ATTACH_IMAGES: ${{ vars.ATTACH_IMAGES }}
           MAX_IMAGE_BYTES: ${{ vars.MAX_IMAGE_BYTES }}
+          SCRAPE_PIN_COMMENTS: ${{ vars.SCRAPE_PIN_COMMENTS }}
+          MAX_PIN_COMMENTS: ${{ vars.MAX_PIN_COMMENTS }}
           DRY_RUN: ${{ vars.DRY_RUN }}
 
       - name: Ensure state directory exists

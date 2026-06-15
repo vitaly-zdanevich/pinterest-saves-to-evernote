@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
+use reqwest::header::{ACCEPT, COOKIE, HeaderMap, HeaderValue, REFERER, SET_COOKIE, USER_AGENT};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
@@ -164,6 +165,62 @@ impl SavedPin {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicPinComment {
+    pub id: Option<String>,
+    pub text: String,
+    pub created_at: Option<String>,
+    pub user_id: Option<String>,
+    pub reply_count: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicPinComments {
+    pub total_count: Option<u64>,
+    pub comments: Vec<PublicPinComment>,
+}
+
+impl PublicPinComments {
+    pub fn attach_to_extra(&self, extra: &mut Map<String, Value>) {
+        if let Some(total_count) = self.total_count {
+            extra.insert("public_comment_count".to_string(), Value::from(total_count));
+        }
+
+        if self.comments.is_empty() {
+            return;
+        }
+
+        let comments = self
+            .comments
+            .iter()
+            .map(|comment| {
+                let mut value = Map::new();
+                if let Some(id) = &comment.id {
+                    value.insert("id".to_string(), Value::String(id.clone()));
+                }
+                value.insert("text".to_string(), Value::String(comment.text.clone()));
+                if let Some(created_at) = &comment.created_at {
+                    value.insert("created_at".to_string(), Value::String(created_at.clone()));
+                }
+                if let Some(user_id) = &comment.user_id {
+                    value.insert("user_id".to_string(), Value::String(user_id.clone()));
+                }
+                if let Some(reply_count) = comment.reply_count {
+                    value.insert("reply_count".to_string(), Value::from(reply_count));
+                }
+                Value::Object(value)
+            })
+            .collect::<Vec<_>>();
+        extra.insert("public_comments".to_string(), Value::Array(comments));
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AggregatedPinData {
+    entity_id: String,
+    comment_count: Option<u64>,
+}
+
 pub async fn resolve_access_token(settings: &Settings) -> Result<String> {
     if settings.can_refresh_pinterest_token() {
         let token = refresh_access_token(settings).await?;
@@ -228,6 +285,107 @@ pub async fn public_profile_saved_pins(settings: &Settings) -> Result<Vec<SavedP
         "parsed public Pinterest profile pins"
     );
     Ok(pins)
+}
+
+pub async fn scrape_public_pin_comments(
+    pin_id: &str,
+    max_comments: usize,
+) -> Result<PublicPinComments> {
+    let pin_url = format!("https://www.pinterest.com/pin/{pin_id}/");
+    let comments_url = format!("https://www.pinterest.com/pin/{pin_id}/comments/");
+    let source_url = format!("/pin/{pin_id}/comments/");
+
+    let client = reqwest::Client::builder()
+        .user_agent(CLIENT_NAME)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .context("failed to build Pinterest public comments HTTP client")?;
+
+    let page_response = client
+        .get(&comments_url)
+        .header(
+            ACCEPT,
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
+        .send()
+        .await
+        .with_context(|| {
+            format!("failed to fetch public Pinterest comments page {comments_url}")
+        })?;
+
+    let status = page_response.status();
+    let final_url = page_response.url().clone();
+    let cookie_header = response_cookie_header(page_response.headers());
+    if !status.is_success() {
+        let body = page_response.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "public Pinterest comments page returned HTTP {status} for {final_url}: {body}"
+        ));
+    }
+
+    let html = page_response.text().await.with_context(|| {
+        format!("failed to read public Pinterest comments page HTML from {final_url}")
+    })?;
+    let aggregated = parse_aggregated_pin_data_from_html(&html).ok_or_else(|| {
+        anyhow!("Pinterest comments page did not expose aggregated pin data for pin {pin_id}")
+    })?;
+    let mut summary = PublicPinComments {
+        total_count: aggregated.comment_count,
+        comments: Vec::new(),
+    };
+
+    if aggregated.comment_count == Some(0) {
+        return Ok(summary);
+    }
+
+    let data = serde_json::json!({
+        "options": {
+            "url": format!("/v3/aggregated_pin_data/{}/comments/", aggregated.entity_id),
+            "data": {}
+        },
+        "context": {}
+    })
+    .to_string();
+    let resource_url = Url::parse("https://www.pinterest.com/resource/ApiResource/get/")
+        .context("invalid Pinterest comments resource URL")?;
+
+    let mut request = client
+        .get(resource_url)
+        .header(ACCEPT, "application/json, text/javascript, */*; q=0.01")
+        .header("X-Requested-With", "XMLHttpRequest")
+        .header("X-Pinterest-AppState", "active")
+        .header("X-Pinterest-PWS-Handler", "www/pin/[id]/comments")
+        .header(USER_AGENT, CLIENT_NAME)
+        .header(REFERER, &comments_url)
+        .query(&[("source_url", source_url.as_str()), ("data", data.as_str())]);
+    if let Some(cookie_header) = cookie_header {
+        request = request.header(COOKIE, cookie_header);
+    }
+
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch public Pinterest comments for {pin_url}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "public Pinterest comments resource returned HTTP {status} for {pin_url}: {body}"
+        ));
+    }
+
+    let value = response
+        .json::<Value>()
+        .await
+        .with_context(|| format!("failed to parse public Pinterest comments for {pin_url}"))?;
+    summary.comments = parse_public_pin_comments_response(&value, max_comments)?;
+    info!(
+        pin_id = pin_id,
+        comments = summary.comments.len(),
+        total_comments = summary.total_count,
+        "scraped public Pinterest comments"
+    );
+    Ok(summary)
 }
 
 async fn refresh_access_token(settings: &Settings) -> Result<String> {
@@ -504,6 +662,116 @@ fn parse_public_profile_html(html: &str) -> Result<Vec<SavedPin>> {
     }
 
     Ok(deduped.into_values().collect())
+}
+
+fn parse_aggregated_pin_data_from_html(html: &str) -> Option<AggregatedPinData> {
+    let marker = "\"aggregatedPinData\":";
+    let start = html.find(marker)? + marker.len();
+    let object = json_object_prefix(&html[start..])?;
+    let value = serde_json::from_str::<Value>(object).ok()?;
+    Some(AggregatedPinData {
+        entity_id: string_field(&value, "entityId")?,
+        comment_count: value.get("commentCount").and_then(Value::as_u64),
+    })
+}
+
+fn json_object_prefix(raw: &str) -> Option<&str> {
+    let raw = raw.trim_start();
+    if !raw.starts_with('{') {
+        return None;
+    }
+
+    let mut depth = 0_u32;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (offset, character) in raw.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match character {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(&raw[..=offset]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn parse_public_pin_comments_response(
+    value: &Value,
+    max_comments: usize,
+) -> Result<Vec<PublicPinComment>> {
+    let response = value
+        .get("resource_response")
+        .ok_or_else(|| anyhow!("Pinterest comments response has no resource_response"))?;
+    if let Some(error) = response.get("error") {
+        return Err(anyhow!(
+            "Pinterest comments response error: {}",
+            pinterest_error_message(error)
+        ));
+    }
+
+    let data = response
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Pinterest comments response has no data array"))?;
+
+    Ok(data
+        .iter()
+        .filter_map(parse_public_pin_comment)
+        .take(max_comments)
+        .collect())
+}
+
+fn parse_public_pin_comment(value: &Value) -> Option<PublicPinComment> {
+    let text = string_field(value, "text")?;
+    Some(PublicPinComment {
+        id: string_field(value, "id"),
+        text,
+        created_at: string_field(value, "created_at"),
+        user_id: nested_string_field(value, &["user", "id"]),
+        reply_count: value.get("comment_count").and_then(Value::as_u64),
+    })
+}
+
+fn pinterest_error_message(error: &Value) -> String {
+    string_field(error, "message_detail")
+        .or_else(|| string_field(error, "message"))
+        .unwrap_or_else(|| error.to_string())
+}
+
+fn response_cookie_header(headers: &HeaderMap) -> Option<HeaderValue> {
+    let cookie = headers
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter_map(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    if cookie.is_empty() {
+        None
+    } else {
+        HeaderValue::from_str(&cookie).ok()
+    }
 }
 
 fn json_ld_scripts(html: &str) -> Vec<&str> {
@@ -784,6 +1052,66 @@ mod tests {
                 .get("public_author")
                 .and_then(Value::as_str),
             Some("example-author")
+        );
+    }
+
+    #[test]
+    fn parses_aggregated_pin_data_from_public_pin_html() {
+        let html = r#"
+            <script>
+              window.__PWS_RELAY_REGISTER_COMPLETED_REQUEST__("{}", {
+                "data": {
+                  "pin": {
+                    "aggregatedPinData": {
+                      "entityId": "5302154233464808675",
+                      "id": "relay-id",
+                      "commentCount": 5,
+                      "note": "brace } inside a string"
+                    }
+                  }
+                }
+              });
+            </script>
+        "#;
+
+        let data = parse_aggregated_pin_data_from_html(html).unwrap();
+
+        assert_eq!(data.entity_id, "5302154233464808675");
+        assert_eq!(data.comment_count, Some(5));
+    }
+
+    #[test]
+    fn parses_public_pin_comments_response() {
+        let response = serde_json::json!({
+            "resource_response": {
+                "status": "success",
+                "data": [
+                    {
+                        "id": "comment-1",
+                        "text": "Hello <world>",
+                        "created_at": "Mon, 15 Jun 2026 10:00:00 +0000",
+                        "user": {"id": "user-1"},
+                        "comment_count": 2
+                    },
+                    {
+                        "id": "sticker-only",
+                        "text": " "
+                    }
+                ]
+            }
+        });
+
+        let comments = parse_public_pin_comments_response(&response, 10).unwrap();
+
+        assert_eq!(
+            comments,
+            vec![PublicPinComment {
+                id: Some("comment-1".to_string()),
+                text: "Hello <world>".to_string(),
+                created_at: Some("Mon, 15 Jun 2026 10:00:00 +0000".to_string()),
+                user_id: Some("user-1".to_string()),
+                reply_count: Some(2),
+            }]
         );
     }
 }

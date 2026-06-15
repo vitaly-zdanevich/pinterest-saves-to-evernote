@@ -9,6 +9,7 @@ use crate::image::ImageDownloader;
 use crate::note;
 use crate::pinterest::{
     PinterestClient, SavedPin, public_profile_saved_pins, resolve_access_token,
+    scrape_public_pin_comments,
 };
 use crate::state::State;
 
@@ -90,8 +91,19 @@ async fn export_pin(
     settings: &Settings,
     state: &mut State,
     image_downloader: Option<&ImageDownloader>,
-    saved: SavedPin,
+    mut saved: SavedPin,
 ) -> Result<()> {
+    if settings.scrape_pin_comments {
+        match scrape_public_pin_comments(&saved.pin.id, settings.max_pin_comments).await {
+            Ok(comments) => comments.attach_to_extra(&mut saved.pin.extra),
+            Err(error) => warn!(
+                pin_id = saved.pin.id,
+                error = %error,
+                "failed to scrape public Pinterest comments; continuing without comments"
+            ),
+        }
+    }
+
     let title = note::title(&saved);
     let image_url = saved.pin.best_image_url().map(ToOwned::to_owned);
     let image =

@@ -34,6 +34,8 @@ pub struct Settings {
     pub page_size: usize,
     pub attach_images: bool,
     pub max_image_bytes: u64,
+    pub scrape_pin_comments: bool,
+    pub max_pin_comments: usize,
 }
 
 impl Settings {
@@ -87,6 +89,11 @@ impl Settings {
             return Err(anyhow!("MAX_IMAGE_BYTES must be greater than 0"));
         }
 
+        let max_pin_comments = parse_usize_env("MAX_PIN_COMMENTS", 25)?;
+        if max_pin_comments == 0 {
+            return Err(anyhow!("MAX_PIN_COMMENTS must be greater than 0"));
+        }
+
         Ok(Self {
             pinterest_access_token,
             pinterest_client_id,
@@ -117,6 +124,8 @@ impl Settings {
             page_size,
             attach_images: parse_bool_env("ATTACH_IMAGES", true)?,
             max_image_bytes,
+            scrape_pin_comments: parse_bool_env("SCRAPE_PIN_COMMENTS", true)?,
+            max_pin_comments,
         })
     }
 

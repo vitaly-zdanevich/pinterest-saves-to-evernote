@@ -6,7 +6,7 @@ This exists because Pinterest saves are not durable archives: Pins and their sou
 
 The default first run is intentionally a baseline run: it records all currently visible Pinterest pins in `state/state.json` and creates no Evernote notes. Later runs create one Evernote note per new pin only. Set `BACKFILL_EXISTING=true` only if you deliberately want to import existing history.
 
-Each note includes the pin title, description, alt text, Pinterest link, source link, image URL, board metadata, and the image itself when Pinterest returns a downloadable image URL. Pinterest API v5 does not expose pin comments, so comments are not exported.
+Each note includes the pin title, description, alt text, Pinterest link, source link, image URL, board metadata, public comments when Pinterest exposes them, and the image itself when Pinterest returns a downloadable image URL. Pinterest API v5 does not expose comment bodies, so comments are fetched with the same unsupported public-page fallback used while API access is unavailable.
 
 ## GitHub Actions Schedule
 
@@ -47,7 +47,8 @@ Unsupported public-profile fallback while waiting for Pinterest API verification
 - Add a GitHub Actions variable named `PUBLIC_PROFILE_TO_PARSE_WITHOUT_API`.
 - Set it to your public Pinterest profile or pins URL, for example `https://www.pinterest.com/vitalyzdanevich/pins/`.
 - When this variable is set, the tool does not use Pinterest OAuth. It fetches the public profile HTML and parses the JSON-LD profile snippet instead.
-- This currently exposes a small recent list, about 10 public pins, with pin title, image URL, Pinterest URL, original Pinterest author, and `datePublished`. It does not expose comments, private/secret boards, full board metadata, or the original source link.
+- This currently exposes a small recent list, about 10 public pins, with pin title, image URL, Pinterest URL, original Pinterest author, and `datePublished`. It does not expose private/secret boards, full board metadata, or the original source link.
+- By default, each new note also tries to scrape the public comments endpoint for that pin. When available, the note includes comment text, creation time, and the Pinterest user ID. Public responses currently do not include commenter display names.
 - This is fragile and unsupported by Pinterest; keep the API credentials as the preferred long-term path.
 
 Optional Evernote secrets:
@@ -73,6 +74,8 @@ Optional Pinterest behavior:
 - `MAX_PINS_PER_RUN`: cap Evernote notes per run. Defaults to `25`.
 - `ATTACH_IMAGES`: download and attach the image resource to Evernote. Defaults to `true`.
 - `MAX_IMAGE_BYTES`: maximum image download size. Defaults to `26214400`.
+- `SCRAPE_PIN_COMMENTS`: scrape public pin comments into each new note. Defaults to `true`.
+- `MAX_PIN_COMMENTS`: maximum text comments to store per note. Defaults to `25`.
 - `DRY_RUN`: fetch and log without writing Evernote or state. Defaults to `false`.
 
 The scheduled GitHub workflow uses `STATE_PATH=state/state.json` because the Actions cache is configured for the `state/` directory.
@@ -82,6 +85,8 @@ The scheduled GitHub workflow uses `STATE_PATH=state/state.json` because the Act
 The tool uses Pinterest API v5 with `boards:read` and `pins:read`. It reads boards with `GET /v5/boards`, saved pins with `GET /v5/boards/{board_id}/pins`, optional section pins with `GET /v5/boards/{board_id}/sections/{section_id}/pins`, or account pins with `GET /v5/pins` when `PINTEREST_FETCH_MODE=account`.
 
 Available pin metadata depends on Pinterest's response, but the code handles the common API fields: `id`, `title`, `description`, `link`, `created_at`, `board_id`, `board_section_id`, `board_owner.username`, `parent_pin_id`, `alt_text`, `creative_type`, and `media.images`.
+
+Pinterest API v5 currently has no public endpoint for comment bodies. This project therefore scrapes comments from public pin pages by default. Treat that as best-effort archival metadata, not a stable API contract.
 
 ## Local Run
 

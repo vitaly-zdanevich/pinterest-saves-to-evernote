@@ -42,6 +42,7 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
         "Pinterest author",
         extra_string(&saved.pin.extra, "public_author"),
     );
+    let public_comments = comments_section(&saved.pin.extra);
     let creative_type = field("Creative type", saved.pin.creative_type.as_deref());
     let parent_pin = field("Parent pin ID", saved.pin.parent_pin_id.as_deref());
     let image_url = saved.pin.best_image_url();
@@ -73,6 +74,7 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
 {section}
 {owner}
 {public_author}
+{public_comments}
 {creative_type}
 {parent_pin}
 {pin_link}
@@ -85,6 +87,67 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
 
 fn extra_string<'a>(extra: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     extra.get(key).and_then(Value::as_str)
+}
+
+fn comments_section(extra: &Map<String, Value>) -> String {
+    let total_count = extra.get("public_comment_count").and_then(Value::as_u64);
+    let comments = extra
+        .get("public_comments")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if total_count.is_none() && comments.is_empty() {
+        return String::new();
+    }
+
+    let label = match (total_count, comments.len()) {
+        (Some(total), scraped) if scraped > 0 && total > scraped as u64 => {
+            format!("{scraped} scraped of {total}")
+        }
+        (Some(total), 0) => total.to_string(),
+        (Some(total), _) => total.to_string(),
+        (None, scraped) => scraped.to_string(),
+    };
+
+    let mut markup = format!(
+        "<div><b>{}:</b> {}</div>\n",
+        encode_safe("Pinterest comments"),
+        encode_safe(&label)
+    );
+    for comment in comments.iter().filter_map(Value::as_object) {
+        if let Some(row) = comment_row(comment) {
+            markup.push_str(&row);
+            markup.push('\n');
+        }
+    }
+    markup
+}
+
+fn comment_row(comment: &Map<String, Value>) -> Option<String> {
+    let text = extra_string(comment, "text")?.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    let mut metadata = Vec::new();
+    if let Some(user_id) = extra_string(comment, "user_id") {
+        metadata.push(format!("Pinterest user {user_id}"));
+    }
+    if let Some(created_at) = extra_string(comment, "created_at") {
+        metadata.push(created_at.to_string());
+    }
+    let label = if metadata.is_empty() {
+        "Comment".to_string()
+    } else {
+        format!("Comment ({})", metadata.join(", "))
+    };
+    let body = text
+        .lines()
+        .map(|line| encode_safe(line.trim()).to_string())
+        .collect::<Vec<_>>()
+        .join("<br/>");
+
+    Some(format!("<div><b>{}:</b> {body}</div>", encode_safe(&label)))
 }
 
 fn field(label: &str, value: Option<&str>) -> String {
@@ -144,13 +207,28 @@ fn truncate_title(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::Map;
+    use serde_json::{Map, Value};
 
     use super::*;
     use crate::pinterest::{PinterestBoard, PinterestPin};
 
     #[test]
     fn renders_enml_with_escaped_values() {
+        let mut extra = Map::new();
+        extra.insert("public_comment_count".to_string(), Value::from(2));
+        extra.insert(
+            "public_comments".to_string(),
+            Value::Array(vec![Value::Object({
+                let mut comment = Map::new();
+                comment.insert("text".to_string(), Value::String("Nice <pin>".to_string()));
+                comment.insert(
+                    "created_at".to_string(),
+                    Value::String("Mon, 15 Jun 2026 10:00:00 +0000".to_string()),
+                );
+                comment.insert("user_id".to_string(), Value::String("user-1".to_string()));
+                comment
+            })]),
+        );
         let saved = SavedPin {
             pin: PinterestPin {
                 id: "123".to_string(),
@@ -165,7 +243,7 @@ mod tests {
                 alt_text: Some("Alt > text".to_string()),
                 creative_type: Some("REGULAR".to_string()),
                 media: None,
-                extra: Map::new(),
+                extra,
             },
             board: Some(PinterestBoard {
                 id: "board-1".to_string(),
@@ -182,5 +260,8 @@ mod tests {
         assert!(enml.contains("https://example.com/?a=1&amp;b=2"));
         assert!(enml.contains("Alt &gt; text"));
         assert!(enml.contains("Ideas"));
+        assert!(enml.contains("Pinterest comments"));
+        assert!(enml.contains("Nice &lt;pin&gt;"));
+        assert!(enml.contains("Pinterest user user-1"));
     }
 }
