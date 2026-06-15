@@ -1,5 +1,6 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
+use tokio::task;
 use tracing::{info, warn};
 
 use crate::config::Settings;
@@ -67,18 +68,6 @@ pub async fn run(settings: Settings) -> Result<()> {
         return Ok(());
     }
 
-    let evernote = if settings.dry_run {
-        None
-    } else {
-        Some(EvernoteClient::new(
-            settings.evernote_auth_token.clone(),
-            Some(settings.evernote_user_store_url.clone()),
-            settings.evernote_note_store_url.clone(),
-            settings.evernote_notebook_guid.clone(),
-            settings.evernote_notebook_name.clone(),
-            settings.evernote_tags.clone(),
-        )?)
-    };
     let image_downloader = if settings.attach_images {
         Some(ImageDownloader::new(settings.max_image_bytes)?)
     } else {
@@ -86,14 +75,7 @@ pub async fn run(settings: Settings) -> Result<()> {
     };
 
     for saved in new_pins {
-        export_pin(
-            &settings,
-            &mut state,
-            evernote.as_ref(),
-            image_downloader.as_ref(),
-            saved,
-        )
-        .await?;
+        export_pin(&settings, &mut state, image_downloader.as_ref(), saved).await?;
     }
 
     if !settings.dry_run {
@@ -107,7 +89,6 @@ pub async fn run(settings: Settings) -> Result<()> {
 async fn export_pin(
     settings: &Settings,
     state: &mut State,
-    evernote: Option<&EvernoteClient>,
     image_downloader: Option<&ImageDownloader>,
     saved: SavedPin,
 ) -> Result<()> {
@@ -133,20 +114,50 @@ async fn export_pin(
         return Ok(());
     }
 
-    if let Some(evernote) = evernote {
-        let guid =
-            evernote.create_pin_note(title.clone(), content, image.as_ref(), pin_url.clone())?;
-        info!(
-            pin_id = saved.pin.id,
-            evernote_guid = guid,
-            title = title,
-            pin_url = pin_url,
-            image_attached = image.is_some(),
-            "created Evernote note"
-        );
-    }
+    let image_attached = image.is_some();
+    let guid =
+        create_evernote_note_blocking(settings, title.clone(), content, image, pin_url.clone())
+            .await?;
+    info!(
+        pin_id = saved.pin.id,
+        evernote_guid = guid,
+        title = title,
+        pin_url = pin_url,
+        image_attached = image_attached,
+        "created Evernote note"
+    );
 
     state.mark_processed(saved.pin.id);
     state.save(&settings.state_path)?;
     Ok(())
+}
+
+async fn create_evernote_note_blocking(
+    settings: &Settings,
+    title: String,
+    content: String,
+    image: Option<crate::image::DownloadedImage>,
+    pin_url: String,
+) -> Result<String> {
+    let token = settings.evernote_auth_token.clone();
+    let user_store_url = settings.evernote_user_store_url.clone();
+    let note_store_url = settings.evernote_note_store_url.clone();
+    let notebook_guid = settings.evernote_notebook_guid.clone();
+    let notebook_name = settings.evernote_notebook_name.clone();
+    let tags = settings.evernote_tags.clone();
+    let source_url = pin_url.clone();
+
+    task::spawn_blocking(move || {
+        let evernote = EvernoteClient::new(
+            token,
+            Some(user_store_url),
+            note_store_url,
+            notebook_guid,
+            notebook_name,
+            tags,
+        )?;
+        evernote.create_pin_note(title, content, image.as_ref(), source_url)
+    })
+    .await
+    .context("Evernote worker task panicked or was cancelled")?
 }
