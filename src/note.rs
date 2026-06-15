@@ -35,7 +35,6 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
     let section = field("Section", section);
     let public_author = public_author_field(&saved.pin.extra);
     let public_comments = comments_section(&saved.pin.extra);
-    let creative_type = field("Creative type", saved.pin.creative_type.as_deref());
     let parent_pin = field("Parent pin ID", saved.pin.parent_pin_id.as_deref());
     let image_url = saved.pin.best_image_url();
     let image_url_row = link_field("Image URL", image_url);
@@ -63,7 +62,6 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
 {section}
 {public_author}
 {public_comments}
-{creative_type}
 {parent_pin}
 {source_link}
 {image_url_row}
@@ -510,6 +508,7 @@ mod tests {
         assert!(!enml.contains("Pinterest pin"));
         assert!(!enml.contains("Board owner"));
         assert!(!enml.contains("<b>Title:</b>"));
+        assert!(!enml.contains("Creative type"));
         assert!(!enml.contains("A &lt; B"));
         assert!(enml.contains("Line &amp; 2"));
         assert!(enml.contains("https://example.com/?a=1&amp;b=2"));
