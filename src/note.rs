@@ -89,7 +89,11 @@ fn board_field(board: Option<&PinterestBoard>) -> String {
 }
 
 fn board_url(board: &PinterestBoard) -> Option<String> {
-    let url = extra_string(&board.extra, "url")?;
+    extra_string(&board.extra, "url").and_then(pinterest_url)
+}
+
+fn pinterest_url(raw: &str) -> Option<String> {
+    let url = raw.trim();
     if url.starts_with("https://www.pinterest.com/") {
         Some(url.to_string())
     } else if url.starts_with('/') {
@@ -169,16 +173,16 @@ fn comment_row(comment: &Map<String, Value>) -> Option<String> {
     }
 
     let mut metadata = Vec::new();
-    if let Some(user_id) = extra_string(comment, "user_id") {
-        metadata.push(format!("Pinterest user {user_id}"));
+    if let Some(author) = comment_author_markup(comment) {
+        metadata.push(author);
     }
     if let Some(created_at) = extra_string(comment, "created_at") {
-        metadata.push(created_at.to_string());
+        metadata.push(encode_safe(created_at).to_string());
     }
     let label = if metadata.is_empty() {
-        "Comment".to_string()
+        "<b>Comment</b>".to_string()
     } else {
-        format!("Comment ({})", metadata.join(", "))
+        format!("<b>Comment</b> ({})", metadata.join(", "))
     };
     let body = text
         .lines()
@@ -186,7 +190,39 @@ fn comment_row(comment: &Map<String, Value>) -> Option<String> {
         .collect::<Vec<_>>()
         .join("<br/>");
 
-    Some(format!("<div><b>{}:</b> {body}</div>", encode_safe(&label)))
+    Some(format!("<div>{label}: {body}</div>"))
+}
+
+fn comment_author_markup(comment: &Map<String, Value>) -> Option<String> {
+    if let Some(username) = extra_string(comment, "user_username") {
+        let username = username.trim().trim_start_matches('@');
+        if !username.is_empty() {
+            let display = format!("@{username}");
+            return match comment_user_url(comment)
+                .or_else(|| pinterest_profile_url_for_username(username))
+            {
+                Some(url) => Some(link_text(&url, &display)),
+                None => Some(encode_safe(&display).to_string()),
+            };
+        }
+    }
+
+    if let Some(full_name) = extra_string(comment, "user_full_name") {
+        let full_name = full_name.trim();
+        if !full_name.is_empty() {
+            return match comment_user_url(comment) {
+                Some(url) => Some(link_text(&url, full_name)),
+                None => Some(encode_safe(full_name).to_string()),
+            };
+        }
+    }
+
+    extra_string(comment, "user_id")
+        .map(|user_id| encode_safe(&format!("Pinterest user {user_id}")).to_string())
+}
+
+fn comment_user_url(comment: &Map<String, Value>) -> Option<String> {
+    extra_string(comment, "user_url").and_then(pinterest_url)
 }
 
 fn field(label: &str, value: Option<&str>) -> String {
@@ -234,12 +270,14 @@ fn imported_by_field() -> String {
 }
 
 fn link_text_field(label: &str, url: &str, text: &str) -> String {
+    let link = link_text(url, text);
+    format!("<div><b>{}:</b> {link}</div>", encode_safe(label))
+}
+
+fn link_text(url: &str, text: &str) -> String {
     let href = encode_double_quoted_attribute(url);
     let text = encode_safe(text);
-    format!(
-        "<div><b>{}:</b> <a href=\"{href}\">{text}</a></div>",
-        encode_safe(label)
-    )
+    format!("<a href=\"{href}\">{text}</a>")
 }
 
 fn clean_title_without_hashtags(raw: &str) -> Option<String> {
@@ -411,6 +449,18 @@ mod tests {
                     Value::String("Mon, 15 Jun 2026 10:00:00 +0000".to_string()),
                 );
                 comment.insert("user_id".to_string(), Value::String("user-1".to_string()));
+                comment.insert(
+                    "user_username".to_string(),
+                    Value::String("commenter".to_string()),
+                );
+                comment.insert(
+                    "user_full_name".to_string(),
+                    Value::String("Commenter Name".to_string()),
+                );
+                comment.insert(
+                    "user_url".to_string(),
+                    Value::String("/commenter/".to_string()),
+                );
                 comment
             })]),
         );
@@ -457,7 +507,9 @@ mod tests {
         assert!(enml.contains("https://www.pinterest.com/author_user/"));
         assert!(enml.contains("Pinterest comments"));
         assert!(enml.contains("Nice &lt;pin&gt;"));
-        assert!(enml.contains("Pinterest user user-1"));
+        assert!(enml.contains("@commenter"));
+        assert!(enml.contains("https://www.pinterest.com/commenter/"));
+        assert!(!enml.contains("Pinterest user user-1"));
         assert!(enml.contains("Imported by"));
         assert!(enml.contains(PROJECT_URL));
     }

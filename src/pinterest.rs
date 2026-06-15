@@ -175,6 +175,9 @@ pub struct PublicPinComment {
     pub text: String,
     pub created_at: Option<String>,
     pub user_id: Option<String>,
+    pub user_username: Option<String>,
+    pub user_full_name: Option<String>,
+    pub user_url: Option<String>,
     pub reply_count: Option<u64>,
 }
 
@@ -208,6 +211,18 @@ impl PublicPinComments {
                 }
                 if let Some(user_id) = &comment.user_id {
                     value.insert("user_id".to_string(), Value::String(user_id.clone()));
+                }
+                if let Some(username) = &comment.user_username {
+                    value.insert("user_username".to_string(), Value::String(username.clone()));
+                }
+                if let Some(full_name) = &comment.user_full_name {
+                    value.insert(
+                        "user_full_name".to_string(),
+                        Value::String(full_name.clone()),
+                    );
+                }
+                if let Some(url) = &comment.user_url {
+                    value.insert("user_url".to_string(), Value::String(url.clone()));
                 }
                 if let Some(reply_count) = comment.reply_count {
                     value.insert("reply_count".to_string(), Value::from(reply_count));
@@ -1058,6 +1073,9 @@ fn parse_public_pin_comment(value: &Value) -> Option<PublicPinComment> {
         text,
         created_at: string_field(value, "created_at"),
         user_id: nested_string_field(value, &["user", "id"]),
+        user_username: nested_string_field(value, &["user", "username"]),
+        user_full_name: nested_string_field(value, &["user", "full_name"]),
+        user_url: nested_string_field(value, &["user", "url"]),
         reply_count: value.get("comment_count").and_then(Value::as_u64),
     })
 }
@@ -1522,7 +1540,12 @@ mod tests {
                         "id": "comment-1",
                         "text": "Hello <world>",
                         "created_at": "Mon, 15 Jun 2026 10:00:00 +0000",
-                        "user": {"id": "user-1"},
+                        "user": {
+                            "id": "user-1",
+                            "username": "commenter",
+                            "full_name": "Commenter Name",
+                            "url": "/commenter/"
+                        },
                         "comment_count": 2
                     },
                     {
@@ -1542,6 +1565,9 @@ mod tests {
                 text: "Hello <world>".to_string(),
                 created_at: Some("Mon, 15 Jun 2026 10:00:00 +0000".to_string()),
                 user_id: Some("user-1".to_string()),
+                user_username: Some("commenter".to_string()),
+                user_full_name: Some("Commenter Name".to_string()),
+                user_url: Some("/commenter/".to_string()),
                 reply_count: Some(2),
             }]
         );
