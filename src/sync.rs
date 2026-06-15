@@ -15,13 +15,29 @@ use crate::state::State;
 
 pub async fn run(settings: Settings) -> Result<()> {
     let mut state = State::load(&settings.state_path)?;
-    let mut saved_pins = if settings.public_profile_to_parse_without_api.is_some() {
+    let using_public_profile = settings.public_profile_to_parse_without_api.is_some();
+    let mut saved_pins = if using_public_profile {
         public_profile_saved_pins(&settings).await?
     } else {
         let access_token = resolve_access_token(&settings).await?;
         let pinterest = PinterestClient::new(&settings, access_token)?;
         pinterest.saved_pins(&settings).await?
     };
+
+    if using_public_profile && state.is_initialized() && !settings.backfill_existing {
+        if let Some(first_processed_index) = saved_pins
+            .iter()
+            .position(|saved| state.contains(&saved.pin.id))
+        {
+            let skipped_existing_and_older = saved_pins.len().saturating_sub(first_processed_index);
+            saved_pins.truncate(first_processed_index);
+            info!(
+                new_or_unseen_before_processed = saved_pins.len(),
+                skipped_existing_and_older,
+                "stopped public Pinterest profile scan at first already processed pin"
+            );
+        }
+    }
 
     saved_pins.sort_by(|left, right| {
         left.pin

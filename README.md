@@ -66,6 +66,7 @@ Leave `EVERNOTE_NOTEBOOK_GUID` unset when using `EVERNOTE_NOTEBOOK_NAME`.
 Optional Pinterest behavior:
 
 - `PUBLIC_PROFILE_TO_PARSE_WITHOUT_API`: public Pinterest profile URL or username to parse without API access. This is an unsupported fallback and overrides the API fetch path when set.
+- `PUBLIC_PROFILE_MAX_PAGES`: public-profile pages to scan by Pinterest bookmark. Defaults to `3`, and one page is usually about 25 pins. Already-initialized public-profile syncs stop at the first already processed pin so enabling pagination does not backfill older saved pins.
 - `PINTEREST_BOARD_IDS`: comma-separated board IDs. If omitted, the tool lists all boards and then pins on each board.
 - `PINTEREST_FETCH_MODE`: `boards` or `account`. Defaults to `boards`.
 - `PINTEREST_INCLUDE_SECTIONS`: also list board-section pins. Defaults to `true`.

@@ -16,6 +16,7 @@ pub struct Settings {
     pub pinterest_client_secret: Option<String>,
     pub pinterest_refresh_token: Option<String>,
     pub public_profile_to_parse_without_api: Option<String>,
+    pub public_profile_max_pages: usize,
     pub pinterest_token_scope: String,
     pub pinterest_api_base_url: String,
     pub pinterest_board_ids: Vec<String>,
@@ -79,6 +80,11 @@ impl Settings {
             return Err(anyhow!("MAX_PINS_PER_RUN must be greater than 0"));
         }
 
+        let public_profile_max_pages = parse_usize_env("PUBLIC_PROFILE_MAX_PAGES", 3)?;
+        if public_profile_max_pages == 0 || public_profile_max_pages > 20 {
+            return Err(anyhow!("PUBLIC_PROFILE_MAX_PAGES must be between 1 and 20"));
+        }
+
         let page_size = parse_usize_env("PINTEREST_PAGE_SIZE", 100)?;
         if page_size == 0 || page_size > 250 {
             return Err(anyhow!("PINTEREST_PAGE_SIZE must be between 1 and 250"));
@@ -100,6 +106,7 @@ impl Settings {
             pinterest_client_secret,
             pinterest_refresh_token,
             public_profile_to_parse_without_api,
+            public_profile_max_pages,
             pinterest_token_scope: env_or("PINTEREST_TOKEN_SCOPE", "boards:read,pins:read"),
             pinterest_api_base_url: env_or(
                 "PINTEREST_API_BASE_URL",

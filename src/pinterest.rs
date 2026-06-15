@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -147,7 +147,11 @@ impl PinterestPin {
     pub fn created_at_utc(&self) -> Option<DateTime<Utc>> {
         self.created_at
             .as_deref()
-            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .and_then(|value| {
+                DateTime::parse_from_rfc3339(value)
+                    .or_else(|_| DateTime::parse_from_rfc2822(value))
+                    .ok()
+            })
             .map(|value| value.with_timezone(&Utc))
     }
 }
@@ -221,6 +225,12 @@ struct AggregatedPinData {
     comment_count: Option<u64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PublicProfilePinsPage {
+    pins: Vec<SavedPin>,
+    next_bookmark: Option<String>,
+}
+
 pub async fn resolve_access_token(settings: &Settings) -> Result<String> {
     if settings.can_refresh_pinterest_token() {
         let token = refresh_access_token(settings).await?;
@@ -262,6 +272,7 @@ pub async fn public_profile_saved_pins(settings: &Settings) -> Result<Vec<SavedP
 
     let status = response.status();
     let final_url = response.url().clone();
+    let cookie_header = response_cookie_header(response.headers());
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         return Err(anyhow!(
@@ -272,11 +283,64 @@ pub async fn public_profile_saved_pins(settings: &Settings) -> Result<Vec<SavedP
     let html = response.text().await.with_context(|| {
         format!("failed to read public Pinterest profile HTML from {final_url}")
     })?;
-    let pins = parse_public_profile_html(&html)?;
-    if pins.is_empty() {
+    let mut page = parse_public_profile_html(&html)?;
+    let username = public_profile_username(&final_url)
+        .or_else(|| public_profile_username(&url))
+        .ok_or_else(|| anyhow!("public Pinterest profile URL has no username: {final_url}"))?;
+    if page.pins.is_empty() {
         return Err(anyhow!(
             "public Pinterest profile parser found no recent pins in {final_url}; the profile may be private or Pinterest changed the page format"
         ));
+    }
+
+    let mut pins = std::mem::take(&mut page.pins);
+    let mut seen = pins
+        .iter()
+        .map(|saved| saved.pin.id.clone())
+        .collect::<BTreeSet<_>>();
+    let source_url = format!("/{username}/");
+    let referer = final_url.to_string();
+
+    for page_number in 2..=settings.public_profile_max_pages {
+        let Some(bookmark) = page.next_bookmark.take() else {
+            break;
+        };
+        match fetch_public_profile_pin_page(
+            &client,
+            &username,
+            &source_url,
+            &referer,
+            &bookmark,
+            cookie_header.clone(),
+        )
+        .await
+        {
+            Ok(next_page) => {
+                let parsed_pins = next_page.pins.len();
+                let next_bookmark = next_page.next_bookmark;
+                for saved in next_page.pins {
+                    append_unique_pin(&mut pins, &mut seen, saved);
+                }
+                info!(
+                    page = page_number,
+                    pins = parsed_pins,
+                    total_pins = pins.len(),
+                    "parsed paginated public Pinterest profile pins"
+                );
+                if parsed_pins == 0 {
+                    break;
+                }
+                page.next_bookmark = next_bookmark;
+            }
+            Err(error) => {
+                warn!(
+                    page = page_number,
+                    error = %error,
+                    "failed to fetch paginated public Pinterest profile pins; continuing with pins already parsed"
+                );
+                break;
+            }
+        }
     }
 
     info!(
@@ -285,6 +349,60 @@ pub async fn public_profile_saved_pins(settings: &Settings) -> Result<Vec<SavedP
         "parsed public Pinterest profile pins"
     );
     Ok(pins)
+}
+
+async fn fetch_public_profile_pin_page(
+    client: &reqwest::Client,
+    username: &str,
+    source_url: &str,
+    referer: &str,
+    bookmark: &str,
+    cookie_header: Option<HeaderValue>,
+) -> Result<PublicProfilePinsPage> {
+    let data = serde_json::json!({
+        "options": {
+            "add_vase": true,
+            "field_set_key": "mobile_grid_item",
+            "is_own_profile_pins": false,
+            "username": username,
+            "bookmarks": [bookmark],
+        },
+        "context": {}
+    })
+    .to_string();
+    let resource_url = Url::parse("https://www.pinterest.com/resource/UserPinsResource/get/")
+        .context("invalid Pinterest user pins resource URL")?;
+
+    let mut request = client
+        .get(resource_url)
+        .header(ACCEPT, "application/json, text/javascript, */*; q=0.01")
+        .header("X-Requested-With", "XMLHttpRequest")
+        .header("X-Pinterest-AppState", "active")
+        .header("X-Pinterest-PWS-Handler", "www/[username]")
+        .header(USER_AGENT, CLIENT_NAME)
+        .header(REFERER, referer)
+        .query(&[("source_url", source_url), ("data", data.as_str())]);
+    if let Some(cookie_header) = cookie_header {
+        request = request.header(COOKIE, cookie_header);
+    }
+
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch public Pinterest pins page for {username}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "public Pinterest pins resource returned HTTP {status} for {username}: {body}"
+        ));
+    }
+
+    let value = response
+        .json::<Value>()
+        .await
+        .with_context(|| format!("failed to parse public Pinterest pins page for {username}"))?;
+    parse_public_profile_pin_page_response(&value)
 }
 
 pub async fn scrape_public_pin_comments(
@@ -647,21 +765,215 @@ fn public_profile_url(raw: &str) -> Result<Url> {
         .context("invalid PUBLIC_PROFILE_TO_PARSE_WITHOUT_API profile path")
 }
 
-fn parse_public_profile_html(html: &str) -> Result<Vec<SavedPin>> {
-    let mut deduped = BTreeMap::<String, SavedPin>::new();
+fn public_profile_username(url: &Url) -> Option<String> {
+    url.path_segments()?
+        .find(|segment| !segment.is_empty())
+        .map(ToOwned::to_owned)
+}
 
-    for script in json_ld_scripts(html) {
-        let value = match serde_json::from_str::<Value>(script.trim()) {
-            Ok(value) => value,
-            Err(error) => {
-                warn!(error = %error, "failed to parse Pinterest JSON-LD script");
-                continue;
-            }
-        };
-        collect_json_ld_pins(&value, &mut deduped);
+fn parse_public_profile_html(html: &str) -> Result<PublicProfilePinsPage> {
+    let mut pins = Vec::new();
+    let mut seen = BTreeSet::new();
+    let next_bookmark = parse_user_pins_resource_from_html(html, &mut pins, &mut seen);
+
+    if pins.is_empty() {
+        for script in json_ld_scripts(html) {
+            let value = match serde_json::from_str::<Value>(script.trim()) {
+                Ok(value) => value,
+                Err(error) => {
+                    warn!(error = %error, "failed to parse Pinterest JSON-LD script");
+                    continue;
+                }
+            };
+            collect_json_ld_pins(&value, &mut pins, &mut seen);
+        }
     }
 
-    Ok(deduped.into_values().collect())
+    Ok(PublicProfilePinsPage {
+        pins,
+        next_bookmark,
+    })
+}
+
+fn parse_user_pins_resource_from_html(
+    html: &str,
+    pins: &mut Vec<SavedPin>,
+    seen: &mut BTreeSet<String>,
+) -> Option<String> {
+    let marker = "\"UserPinsResource\":";
+    let start = html.find(marker)? + marker.len();
+    let object = json_object_prefix(&html[start..])?;
+    let resources = match serde_json::from_str::<Value>(object) {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(error = %error, "failed to parse Pinterest UserPinsResource state");
+            return None;
+        }
+    };
+
+    let mut next_bookmark = None;
+    for resource in resources.as_object()?.values() {
+        let Some(data) = resource.get("data").and_then(Value::as_array) else {
+            continue;
+        };
+        let mut parsed = 0_usize;
+        for pin in data.iter().filter_map(parse_public_profile_resource_pin) {
+            parsed += 1;
+            append_unique_pin(pins, seen, pin);
+        }
+        if parsed > 0 && next_bookmark.is_none() {
+            next_bookmark = public_profile_next_bookmark(resource);
+        }
+    }
+
+    next_bookmark
+}
+
+fn parse_public_profile_pin_page_response(value: &Value) -> Result<PublicProfilePinsPage> {
+    let response = value
+        .get("resource_response")
+        .ok_or_else(|| anyhow!("Pinterest user pins response has no resource_response"))?;
+    if let Some(error) = response.get("error") {
+        return Err(anyhow!(
+            "Pinterest user pins response error: {}",
+            pinterest_error_message(error)
+        ));
+    }
+
+    let data = response
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Pinterest user pins response has no data array"))?;
+
+    let mut pins = Vec::new();
+    let mut seen = BTreeSet::new();
+    for pin in data.iter().filter_map(parse_public_profile_resource_pin) {
+        append_unique_pin(&mut pins, &mut seen, pin);
+    }
+
+    Ok(PublicProfilePinsPage {
+        pins,
+        next_bookmark: public_profile_next_bookmark(response),
+    })
+}
+
+fn public_profile_next_bookmark(value: &Value) -> Option<String> {
+    string_field(value, "nextBookmark")
+        .or_else(|| string_field(value, "bookmark"))
+        .filter(|bookmark| bookmark != "-end-")
+}
+
+fn append_unique_pin(pins: &mut Vec<SavedPin>, seen: &mut BTreeSet<String>, saved_pin: SavedPin) {
+    if seen.insert(saved_pin.pin.id.clone()) {
+        pins.push(saved_pin);
+    }
+}
+
+fn parse_public_profile_resource_pin(value: &Value) -> Option<SavedPin> {
+    let id = string_field(value, "id")?;
+    let board = parse_public_profile_board(value.get("board"));
+    let board_id = board
+        .as_ref()
+        .map(|board| board.id.clone())
+        .or_else(|| nested_string_field(value, &["board", "id"]));
+    let board_owner =
+        nested_string_field(value, &["pinner", "username"]).map(|username| PinterestBoardOwner {
+            username: Some(username),
+            extra: Map::new(),
+        });
+    let mut extra = Map::new();
+    if let Some(author) = nested_string_field(value, &["origin_pinner", "full_name"])
+        .or_else(|| nested_string_field(value, &["origin_pinner", "username"]))
+        .or_else(|| nested_string_field(value, &["native_creator", "full_name"]))
+        .or_else(|| nested_string_field(value, &["native_creator", "username"]))
+    {
+        extra.insert("public_author".to_string(), Value::String(author));
+    }
+    if let Some(username) = nested_string_field(value, &["origin_pinner", "username"]) {
+        extra.insert(
+            "public_author_username".to_string(),
+            Value::String(username),
+        );
+    }
+    if let Some(domain) =
+        string_field(value, "domain").or_else(|| string_field(value, "link_domain"))
+    {
+        extra.insert("public_source_domain".to_string(), Value::String(domain));
+    }
+
+    Some(SavedPin {
+        pin: PinterestPin {
+            id,
+            title: string_field(value, "grid_title")
+                .or_else(|| string_field(value, "seo_title"))
+                .or_else(|| string_field(value, "title")),
+            description: string_field(value, "description"),
+            link: string_field(value, "link")
+                .or_else(|| string_field(value, "tracked_link"))
+                .or_else(|| string_field(value, "utm_link")),
+            created_at: string_field(value, "created_at").map(normalize_pinterest_datetime),
+            board_id,
+            board_section_id: None,
+            board_owner,
+            parent_pin_id: nested_string_field(value, &["pin_join", "canonical_pin_id"]),
+            alt_text: string_field(value, "alt_text")
+                .or_else(|| string_field(value, "auto_alt_text")),
+            creative_type: Some("public_profile_resource".to_string()),
+            media: public_profile_media(value),
+            extra,
+        },
+        board,
+        section: None,
+    })
+}
+
+fn parse_public_profile_board(value: Option<&Value>) -> Option<PinterestBoard> {
+    let value = value?;
+    let id = string_field(value, "id")?;
+    let extra = value.as_object().cloned().unwrap_or_default();
+    Some(PinterestBoard {
+        id,
+        name: string_field(value, "name"),
+        extra,
+    })
+}
+
+fn public_profile_media(value: &Value) -> Option<PinterestMedia> {
+    let images = value.get("images")?.as_object()?;
+    let mut parsed = BTreeMap::new();
+
+    for (key, image) in images {
+        let Some(url) = string_field(image, "url") else {
+            continue;
+        };
+        parsed.insert(
+            key.clone(),
+            PinterestImage {
+                url: Some(url),
+                width: image.get("width").and_then(Value::as_u64),
+                height: image.get("height").and_then(Value::as_u64),
+                extra: image.as_object().cloned().unwrap_or_default(),
+            },
+        );
+    }
+
+    if parsed.is_empty() {
+        None
+    } else {
+        Some(PinterestMedia {
+            media_type: Some("image".to_string()),
+            images: parsed,
+            url: None,
+            extra: Map::new(),
+        })
+    }
+}
+
+fn normalize_pinterest_datetime(value: String) -> String {
+    DateTime::parse_from_rfc3339(&value)
+        .or_else(|_| DateTime::parse_from_rfc2822(&value))
+        .map(|datetime| datetime.to_rfc3339())
+        .unwrap_or(value)
 }
 
 fn parse_aggregated_pin_data_from_html(html: &str) -> Option<AggregatedPinData> {
@@ -800,22 +1112,22 @@ fn json_ld_scripts(html: &str) -> Vec<&str> {
     scripts
 }
 
-fn collect_json_ld_pins(value: &Value, deduped: &mut BTreeMap<String, SavedPin>) {
+fn collect_json_ld_pins(value: &Value, pins: &mut Vec<SavedPin>, seen: &mut BTreeSet<String>) {
     match value {
         Value::Array(items) => {
             for item in items {
-                collect_json_ld_pins(item, deduped);
+                collect_json_ld_pins(item, pins, seen);
             }
         }
         Value::Object(object) => {
             if let Some(parts) = object.get("hasPart").and_then(Value::as_array) {
                 for part in parts {
-                    collect_json_ld_pins(part, deduped);
+                    collect_json_ld_pins(part, pins, seen);
                 }
             }
 
             if let Some(saved_pin) = parse_json_ld_pin(value) {
-                deduped.entry(saved_pin.pin.id.clone()).or_insert(saved_pin);
+                append_unique_pin(pins, seen, saved_pin);
             }
         }
         _ => {}
@@ -853,7 +1165,7 @@ fn parse_json_ld_pin(value: &Value) -> Option<SavedPin> {
             title: string_field(value, "headline").or_else(|| string_field(value, "name")),
             description: string_field(value, "description"),
             link: None,
-            created_at: string_field(value, "datePublished"),
+            created_at: string_field(value, "datePublished").map(normalize_pinterest_datetime),
             board_id: None,
             board_section_id: None,
             board_owner: None,
@@ -1036,22 +1348,142 @@ mod tests {
             </html>
         "#;
 
-        let pins = parse_public_profile_html(html).unwrap();
+        let page = parse_public_profile_html(html).unwrap();
 
-        assert_eq!(pins.len(), 1);
-        assert_eq!(pins[0].pin.id, "123456789");
-        assert_eq!(pins[0].pin.title.as_deref(), Some("Example pin title"));
+        assert_eq!(page.pins.len(), 1);
+        assert_eq!(page.next_bookmark, None);
+        assert_eq!(page.pins[0].pin.id, "123456789");
+        assert_eq!(page.pins[0].pin.title.as_deref(), Some("Example pin title"));
         assert_eq!(
-            pins[0].pin.best_image_url(),
+            page.pins[0].pin.best_image_url(),
             Some("https://i.pinimg.com/736x/example.jpg")
         );
         assert_eq!(
-            pins[0]
+            page.pins[0]
                 .pin
                 .extra
                 .get("public_author")
                 .and_then(Value::as_str),
             Some("example-author")
+        );
+    }
+
+    #[test]
+    fn parses_public_profile_user_pins_resource() {
+        let html = r#"
+            <script>
+              window.__PWS_DATA__ = {
+                "resources": {
+                  "UserPinsResource": {
+                    "profile": {
+                      "data": [
+                        {
+                          "id": "111",
+                          "grid_title": "",
+                          "seo_title": "Nintendo ds | Tecnologia, Gadgets",
+                          "description": "A handheld",
+                          "created_at": "Mon, 15 Jun 2026 02:59:57 +0000",
+                          "link": "https://example.com/source",
+                          "alt_text": "A console",
+                          "images": {
+                            "236x": {
+                              "url": "https://i.pinimg.com/236x/example.jpg",
+                              "width": 236,
+                              "height": 314
+                            },
+                            "736x": {
+                              "url": "https://i.pinimg.com/736x/example.jpg",
+                              "width": 736,
+                              "height": 981
+                            }
+                          },
+                          "board": {"id": "board-1", "name": "tech"},
+                          "pinner": {"username": "vitalyzdanevich"},
+                          "origin_pinner": {"username": "author", "full_name": "Author Name"},
+                          "domain": "example.com"
+                        },
+                        {
+                          "id": "111",
+                          "seo_title": "Duplicate"
+                        }
+                      ],
+                      "nextBookmark": "bookmark-1"
+                    }
+                  }
+                }
+              };
+            </script>
+        "#;
+
+        let page = parse_public_profile_html(html).unwrap();
+
+        assert_eq!(page.next_bookmark.as_deref(), Some("bookmark-1"));
+        assert_eq!(page.pins.len(), 1);
+        let saved = &page.pins[0];
+        assert_eq!(saved.pin.id, "111");
+        assert_eq!(
+            saved.pin.title.as_deref(),
+            Some("Nintendo ds | Tecnologia, Gadgets")
+        );
+        assert_eq!(
+            saved.pin.created_at.as_deref(),
+            Some("2026-06-15T02:59:57+00:00")
+        );
+        assert_eq!(saved.pin.board_id.as_deref(), Some("board-1"));
+        assert_eq!(
+            saved
+                .pin
+                .board_owner
+                .as_ref()
+                .and_then(|owner| owner.username.as_deref()),
+            Some("vitalyzdanevich")
+        );
+        assert_eq!(
+            saved.board.as_ref().and_then(|board| board.name.as_deref()),
+            Some("tech")
+        );
+        assert_eq!(
+            saved.pin.best_image_url(),
+            Some("https://i.pinimg.com/736x/example.jpg")
+        );
+        assert_eq!(
+            saved.pin.extra.get("public_author").and_then(Value::as_str),
+            Some("Author Name")
+        );
+    }
+
+    #[test]
+    fn parses_public_profile_user_pins_page_response() {
+        let response = serde_json::json!({
+            "resource_response": {
+                "status": "success",
+                "code": 0,
+                "data": [
+                    {
+                        "id": "222",
+                        "grid_title": "Next page title",
+                        "created_at": "Mon, 15 Jun 2026 03:01:00 +0000",
+                        "images": {
+                            "474x": {
+                                "url": "https://i.pinimg.com/474x/page2.jpg",
+                                "width": 474,
+                                "height": 632
+                            }
+                        }
+                    }
+                ],
+                "bookmark": "bookmark-2"
+            }
+        });
+
+        let page = parse_public_profile_pin_page_response(&response).unwrap();
+
+        assert_eq!(page.next_bookmark.as_deref(), Some("bookmark-2"));
+        assert_eq!(page.pins.len(), 1);
+        assert_eq!(page.pins[0].pin.id, "222");
+        assert_eq!(
+            page.pins[0].pin.best_image_url(),
+            Some("https://i.pinimg.com/474x/page2.jpg")
         );
     }
 
