@@ -1,5 +1,14 @@
 # Pinterest Saves to Evernote
 
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=vitaly-zdanevich_pinterest-saves-to-evernote&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=vitaly-zdanevich_pinterest-saves-to-evernote)
+[![Reliability Rating](https://sonarcloud.io/api/project_badges/measure?project=vitaly-zdanevich_pinterest-saves-to-evernote&metric=reliability_rating)](https://sonarcloud.io/summary/new_code?id=vitaly-zdanevich_pinterest-saves-to-evernote)
+[![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=vitaly-zdanevich_pinterest-saves-to-evernote&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=vitaly-zdanevich_pinterest-saves-to-evernote)
+[![Maintainability Rating](https://sonarcloud.io/api/project_badges/measure?project=vitaly-zdanevich_pinterest-saves-to-evernote&metric=sqale_rating)](https://sonarcloud.io/summary/new_code?id=vitaly-zdanevich_pinterest-saves-to-evernote)
+[![Bugs](https://sonarcloud.io/api/project_badges/measure?project=vitaly-zdanevich_pinterest-saves-to-evernote&metric=bugs)](https://sonarcloud.io/summary/new_code?id=vitaly-zdanevich_pinterest-saves-to-evernote)
+[![Vulnerabilities](https://sonarcloud.io/api/project_badges/measure?project=vitaly-zdanevich_pinterest-saves-to-evernote&metric=vulnerabilities)](https://sonarcloud.io/summary/new_code?id=vitaly-zdanevich_pinterest-saves-to-evernote)
+[![Code Smells](https://sonarcloud.io/api/project_badges/measure?project=vitaly-zdanevich_pinterest-saves-to-evernote&metric=code_smells)](https://sonarcloud.io/summary/new_code?id=vitaly-zdanevich_pinterest-saves-to-evernote)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=vitaly-zdanevich_pinterest-saves-to-evernote&metric=coverage)](https://sonarcloud.io/summary/new_code?id=vitaly-zdanevich_pinterest-saves-to-evernote)
+
 Rust CLI for a scheduled GitHub Actions job that exports newly saved Pinterest pins to Evernote.
 
 Privacy policy for Pinterest app review: [PRIVACY.md](PRIVACY.md).
@@ -18,7 +27,7 @@ The hourly schedule is conservative for GitHub Actions reliability. If you use t
 
 The `sync` job keeps `state/state.json` in the GitHub Actions cache and uploads it as a workflow artifact after each run. This is enough for one personal scheduled job; do not run multiple schedules for the same Pinterest/Evernote account in parallel.
 
-The CI workflow in `.github/workflows/ci.yml` runs tests on push and pull requests. Both workflows use Node.js 24-compatible action majors: `actions/checkout@v6`, `actions/cache@v5`, and `actions/upload-artifact@v6`.
+The CI workflow in `.github/workflows/ci.yml` runs tests and SonarCloud analysis on push and pull requests. Both workflows opt into Node.js 24 for JavaScript actions.
 
 ## Required GitHub Secrets
 
@@ -50,7 +59,7 @@ Unsupported public-profile fallback while waiting for Pinterest API verification
 - Set it to your public Pinterest profile or pins URL, for example `https://www.pinterest.com/vitalyzdanevich/pins/`.
 - When this variable is set, the tool does not use Pinterest OAuth. It fetches the public profile HTML, parses public pin data, and follows Pinterest's public bookmark pagination up to `PUBLIC_PROFILE_MAX_PAGES`.
 - This currently exposes recent public pins with pin title, description, image URL, Pinterest URL, original source link, board, original Pinterest author, and save time when Pinterest exposes those fields. Author names are linked to their Pinterest profile when a username is available. It does not expose private/secret boards.
-- By default, each new note also tries to scrape the public comments endpoint for that pin. When available, the note includes comment text, creation time, and the Pinterest user ID. Public responses currently do not include commenter display names.
+- By default, each new note also tries to scrape the public comments endpoint for that pin. When available, the note includes comment text, creation time, and a linked commenter username only when Pinterest exposes it. Public responses often expose only numeric user IDs, and those IDs are intentionally omitted from notes.
 - This is fragile and unsupported by Pinterest; keep the API credentials as the preferred long-term path.
 
 Optional Evernote secrets:
