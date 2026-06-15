@@ -4,6 +4,8 @@ use serde_json::{Map, Value};
 use crate::image::DownloadedImage;
 use crate::pinterest::SavedPin;
 
+const PROJECT_URL: &str = "https://github.com/vitaly-zdanevich/pinterest-saves-to-evernote";
+
 pub fn title(saved: &SavedPin) -> String {
     let raw = saved.pin.title.as_deref();
     let title = raw
@@ -56,6 +58,7 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
     let image_url = saved.pin.best_image_url();
     let image_url_row = link_field("Image URL", image_url);
     let source_link = link_field("Source link", saved.pin.link.as_deref());
+    let imported_by = imported_by_field();
     let image_markup = image
         .map(|image| {
             let mime_type = encode_double_quoted_attribute(&image.mime_type);
@@ -84,6 +87,7 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
 {parent_pin}
 {source_link}
 {image_url_row}
+{imported_by}
 </en-note>"#
     )
 }
@@ -216,6 +220,14 @@ fn link_field(label: &str, url: Option<&str>) -> String {
         .filter(|url| !url.is_empty())
         .map(|url| link_text_field(label, url, url))
         .unwrap_or_default()
+}
+
+fn imported_by_field() -> String {
+    format!(
+        "<div>Imported by <a href=\"{href}\">{text}</a></div>",
+        href = encode_double_quoted_attribute(PROJECT_URL),
+        text = encode_safe(PROJECT_URL)
+    )
 }
 
 fn link_text_field(label: &str, url: &str, text: &str) -> String {
@@ -437,5 +449,7 @@ mod tests {
         assert!(enml.contains("Pinterest comments"));
         assert!(enml.contains("Nice &lt;pin&gt;"));
         assert!(enml.contains("Pinterest user user-1"));
+        assert!(enml.contains("Imported by"));
+        assert!(enml.contains(PROJECT_URL));
     }
 }
