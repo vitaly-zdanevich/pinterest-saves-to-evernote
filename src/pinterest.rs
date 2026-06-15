@@ -1315,6 +1315,10 @@ fn extract_pin_id_from_url(url: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn fixture_json(raw: &str) -> Value {
+        serde_json::from_str(raw).expect("fixture JSON")
+    }
+
     #[test]
     fn chooses_largest_image() {
         let pin = PinterestPin {
@@ -1376,27 +1380,7 @@ mod tests {
 
     #[test]
     fn parses_public_profile_json_ld_pins() {
-        let html = r#"
-            <html>
-              <script data-test-id="profile-snippet" type="application/ld+json">
-                {
-                  "@context": "https://schema.org/",
-                  "@type": "ProfilePage",
-                  "hasPart": [
-                    {
-                      "@type": "SocialMediaPosting",
-                      "author": {"@type": "Person", "name": "example-author"},
-                      "headline": "Example pin title",
-                      "description": "Example description",
-                      "image": "https://i.pinimg.com/736x/example.jpg",
-                      "url": "https://www.pinterest.com/pin/example-title--123456789/",
-                      "datePublished": "2026-06-14T20:32:17.000Z"
-                    }
-                  ]
-                }
-              </script>
-            </html>
-        "#;
+        let html = include_str!("../tests/fixtures/pinterest/public_profile_json_ld.html");
 
         let page = parse_public_profile_html(html).unwrap();
 
@@ -1420,50 +1404,7 @@ mod tests {
 
     #[test]
     fn parses_public_profile_user_pins_resource() {
-        let html = r#"
-            <script>
-              window.__PWS_DATA__ = {
-                "resources": {
-                  "UserPinsResource": {
-                    "profile": {
-                      "data": [
-                        {
-                          "id": "111",
-                          "grid_title": "",
-                          "seo_title": "Nintendo ds | Tecnologia, Gadgets",
-                          "description": "A handheld",
-                          "created_at": "Mon, 15 Jun 2026 02:59:57 +0000",
-                          "link": "https://example.com/source",
-                          "alt_text": "A console",
-                          "images": {
-                            "236x": {
-                              "url": "https://i.pinimg.com/236x/example.jpg",
-                              "width": 236,
-                              "height": 314
-                            },
-                            "736x": {
-                              "url": "https://i.pinimg.com/736x/example.jpg",
-                              "width": 736,
-                              "height": 981
-                            }
-                          },
-                          "board": {"id": "board-1", "name": "tech"},
-                          "pinner": {"username": "vitalyzdanevich"},
-                          "origin_pinner": {"username": "author", "full_name": "Author Name"},
-                          "domain": "example.com"
-                        },
-                        {
-                          "id": "111",
-                          "seo_title": "Duplicate"
-                        }
-                      ],
-                      "nextBookmark": "bookmark-1"
-                    }
-                  }
-                }
-              };
-            </script>
-        "#;
+        let html = include_str!("../tests/fixtures/pinterest/user_pins_resource.html");
 
         let page = parse_public_profile_html(html).unwrap();
 
@@ -1504,27 +1445,9 @@ mod tests {
 
     #[test]
     fn parses_public_profile_user_pins_page_response() {
-        let response = serde_json::json!({
-            "resource_response": {
-                "status": "success",
-                "code": 0,
-                "data": [
-                    {
-                        "id": "222",
-                        "grid_title": "Next page title",
-                        "created_at": "Mon, 15 Jun 2026 03:01:00 +0000",
-                        "images": {
-                            "474x": {
-                                "url": "https://i.pinimg.com/474x/page2.jpg",
-                                "width": 474,
-                                "height": 632
-                            }
-                        }
-                    }
-                ],
-                "bookmark": "bookmark-2"
-            }
-        });
+        let response = fixture_json(include_str!(
+            "../tests/fixtures/pinterest/user_pins_page_response.json"
+        ));
 
         let page = parse_public_profile_pin_page_response(&response).unwrap();
 
@@ -1608,20 +1531,9 @@ mod tests {
 
     #[test]
     fn parses_public_profile_resource_pin_fallback_fields() {
-        let value = serde_json::json!({
-            "id": "333",
-            "title": "Fallback title",
-            "tracked_link": "https://example.com/tracked",
-            "auto_alt_text": "Generated alt",
-            "created_at": "not a date",
-            "board": {"id": "board-2"},
-            "native_creator": {"username": "native_author"},
-            "link_domain": "example.com",
-            "pin_join": {"canonical_pin_id": "parent-1"},
-            "images": {
-                "bad": {"width": 100, "height": 100}
-            }
-        });
+        let value = fixture_json(include_str!(
+            "../tests/fixtures/pinterest/public_profile_resource_pin_fallback.json"
+        ));
 
         let saved = parse_public_profile_resource_pin(&value).expect("public pin");
 
@@ -1754,22 +1666,7 @@ mod tests {
 
     #[test]
     fn parses_aggregated_pin_data_from_public_pin_html() {
-        let html = r#"
-            <script>
-              window.__PWS_RELAY_REGISTER_COMPLETED_REQUEST__("{}", {
-                "data": {
-                  "pin": {
-                    "aggregatedPinData": {
-                      "entityId": "5302154233464808675",
-                      "id": "relay-id",
-                      "commentCount": 5,
-                      "note": "brace } inside a string"
-                    }
-                  }
-                }
-              });
-            </script>
-        "#;
+        let html = include_str!("../tests/fixtures/pinterest/aggregated_pin_data.html");
 
         let data = parse_aggregated_pin_data_from_html(html).unwrap();
 
@@ -1779,29 +1676,9 @@ mod tests {
 
     #[test]
     fn parses_public_pin_comments_response() {
-        let response = serde_json::json!({
-            "resource_response": {
-                "status": "success",
-                "data": [
-                    {
-                        "id": "comment-1",
-                        "text": "Hello <world>",
-                        "created_at": "Mon, 15 Jun 2026 10:00:00 +0000",
-                        "user": {
-                            "id": "user-1",
-                            "username": "commenter",
-                            "full_name": "Commenter Name",
-                            "url": "/commenter/"
-                        },
-                        "comment_count": 2
-                    },
-                    {
-                        "id": "sticker-only",
-                        "text": " "
-                    }
-                ]
-            }
-        });
+        let response = fixture_json(include_str!(
+            "../tests/fixtures/pinterest/public_pin_comments_response.json"
+        ));
 
         let comments = parse_public_pin_comments_response(&response, 10).unwrap();
 

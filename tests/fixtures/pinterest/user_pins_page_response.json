@@ -1,0 +1,21 @@
+{
+  "resource_response": {
+    "status": "success",
+    "code": 0,
+    "data": [
+      {
+        "id": "222",
+        "grid_title": "Next page title",
+        "created_at": "Mon, 15 Jun 2026 03:01:00 +0000",
+        "images": {
+          "474x": {
+            "url": "https://i.pinimg.com/474x/page2.jpg",
+            "width": 474,
+            "height": 632
+          }
+        }
+      }
+    ],
+    "bookmark": "bookmark-2"
+  }
+}

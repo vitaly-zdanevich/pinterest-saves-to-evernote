@@ -1,0 +1,14 @@
+{
+  "id": "333",
+  "title": "Fallback title",
+  "tracked_link": "https://example.com/tracked",
+  "auto_alt_text": "Generated alt",
+  "created_at": "not a date",
+  "board": {"id": "board-2"},
+  "native_creator": {"username": "native_author"},
+  "link_domain": "example.com",
+  "pin_join": {"canonical_pin_id": "parent-1"},
+  "images": {
+    "bad": {"width": 100, "height": 100}
+  }
+}

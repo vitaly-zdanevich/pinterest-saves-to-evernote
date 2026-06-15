@@ -1,0 +1,23 @@
+{
+  "resource_response": {
+    "status": "success",
+    "data": [
+      {
+        "id": "comment-1",
+        "text": "Hello <world>",
+        "created_at": "Mon, 15 Jun 2026 10:00:00 +0000",
+        "user": {
+          "id": "user-1",
+          "username": "commenter",
+          "full_name": "Commenter Name",
+          "url": "/commenter/"
+        },
+        "comment_count": 2
+      },
+      {
+        "id": "sticker-only",
+        "text": " "
+      }
+    ]
+  }
+}
