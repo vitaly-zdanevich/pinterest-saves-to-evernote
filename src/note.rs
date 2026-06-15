@@ -24,12 +24,6 @@ pub fn title_hashtags(saved: &SavedPin) -> Vec<String> {
 }
 
 pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
-    let clean_title = saved
-        .pin
-        .title
-        .as_deref()
-        .and_then(clean_title_without_hashtags);
-    let title = field("Title", clean_title.as_deref());
     let description = multiline_field("Description", saved.pin.description.as_deref());
     let alt_text = multiline_field("Alt text", saved.pin.alt_text.as_deref());
     let created_at = field("Created at", saved.pin.created_at.as_deref());
@@ -66,7 +60,6 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
 <!DOCTYPE en-note SYSTEM "http://xml.evernote.com/pub/enml2.dtd">
 <en-note>
 {image_markup}
-{title}
 {description}
 {alt_text}
 {created_at}
@@ -371,7 +364,7 @@ mod tests {
         );
 
         let enml = enml(&saved, None);
-        assert!(enml.contains("Y2k older brother core wallpaper"));
+        assert!(!enml.contains("Y2k older brother core wallpaper"));
         assert!(!enml.contains("#olderbrothercore"));
         assert!(!enml.contains("#olderbrother"));
         assert!(!enml.contains("#nostalgia"));
@@ -431,7 +424,8 @@ mod tests {
         assert!(!enml.contains("Pin ID"));
         assert!(!enml.contains("Pinterest pin"));
         assert!(!enml.contains("Board owner"));
-        assert!(enml.contains("A &lt; B"));
+        assert!(!enml.contains("<b>Title:</b>"));
+        assert!(!enml.contains("A &lt; B"));
         assert!(enml.contains("Line &amp; 2"));
         assert!(enml.contains("https://example.com/?a=1&amp;b=2"));
         assert!(enml.contains("Alt &gt; text"));
