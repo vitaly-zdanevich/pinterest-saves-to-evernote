@@ -2,6 +2,8 @@
 
 Rust CLI for a scheduled GitHub Actions job that exports newly saved Pinterest pins to Evernote.
 
+Privacy policy for Pinterest app review: [PRIVACY.md](PRIVACY.md).
+
 This exists because Pinterest saves are not durable archives: Pins and their source images can disappear when Pinterest, the uploader, or the source site removes them. The sync creates one Evernote note per new saved Pin and can attach the image itself, so your saved reference survives outside Pinterest.
 
 The default first run is intentionally a baseline run: it records all currently visible Pinterest pins in `state/state.json` and creates no Evernote notes. Later runs create one Evernote note per new pin only. Set `BACKFILL_EXISTING=true` only if you deliberately want to import existing history.
