@@ -248,6 +248,20 @@ struct AggregatedPinData {
 struct PublicProfilePinsPage {
     pins: Vec<SavedPin>,
     next_bookmark: Option<String>,
+    diagnostics: PublicProfileParseDiagnostics,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PublicProfileParseDiagnostics {
+    user_pins_resource_marker_found: bool,
+    user_pins_resource_json_found: bool,
+    user_pins_resource_parse_error: Option<String>,
+    user_pins_resource_objects: usize,
+    user_pins_resource_data_arrays: usize,
+    user_pins_resource_pins: usize,
+    json_ld_scripts: usize,
+    json_ld_parse_errors: usize,
+    json_ld_pins: usize,
 }
 
 pub async fn resolve_access_token(settings: &Settings) -> Result<String> {
@@ -307,12 +321,25 @@ pub async fn public_profile_saved_pins(settings: &Settings) -> Result<Vec<SavedP
     // The first page is real HTML. It normally contains Pinterest's embedded
     // UserPinsResource state; JSON-LD is kept as a weaker fallback.
     let mut page = parse_public_profile_html(&html)?;
+    info!(
+        user_pins_resource_marker_found = page.diagnostics.user_pins_resource_marker_found,
+        user_pins_resource_json_found = page.diagnostics.user_pins_resource_json_found,
+        user_pins_resource_parse_error = page.diagnostics.user_pins_resource_parse_error.as_deref(),
+        user_pins_resource_objects = page.diagnostics.user_pins_resource_objects,
+        user_pins_resource_data_arrays = page.diagnostics.user_pins_resource_data_arrays,
+        user_pins_resource_pins = page.diagnostics.user_pins_resource_pins,
+        json_ld_scripts = page.diagnostics.json_ld_scripts,
+        json_ld_parse_errors = page.diagnostics.json_ld_parse_errors,
+        json_ld_pins = page.diagnostics.json_ld_pins,
+        "parsed public Pinterest profile HTML stages"
+    );
     let username = public_profile_username(&final_url)
         .or_else(|| public_profile_username(&url))
         .ok_or_else(|| anyhow!("public Pinterest profile URL has no username: {final_url}"))?;
     if page.pins.is_empty() {
         return Err(anyhow!(
-            "public Pinterest profile parser found no recent pins in {final_url}; the profile may be private or Pinterest changed the page format"
+            "public Pinterest profile parser found no recent pins in {final_url}; parser diagnostics: {}; the profile may be private or Pinterest changed the page format",
+            profile_parse_diagnostics(&page.diagnostics)
         ));
     }
 
@@ -418,20 +445,32 @@ async fn fetch_public_profile_pin_page(
     let response = request
         .send()
         .await
-        .with_context(|| format!("failed to fetch public Pinterest pins page for {username}"))?;
+        .with_context(|| {
+            format!(
+                "public Pinterest profile pagination fetch stage failed for username={username}, bookmark={bookmark}"
+            )
+        })?;
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         return Err(anyhow!(
-            "public Pinterest pins resource returned HTTP {status} for {username}: {body}"
+            "public Pinterest profile pagination HTTP stage failed for username={username}, bookmark={bookmark}: UserPinsResource returned HTTP {status}: {body}"
         ));
     }
 
     let value = response
         .json::<Value>()
         .await
-        .with_context(|| format!("failed to parse public Pinterest pins page for {username}"))?;
-    parse_public_profile_pin_page_response(&value)
+        .with_context(|| {
+            format!(
+                "public Pinterest profile pagination JSON stage failed for username={username}, bookmark={bookmark}"
+            )
+        })?;
+    parse_public_profile_pin_page_response(&value).with_context(|| {
+        format!(
+            "public Pinterest profile pagination resource_response stage failed for username={username}, bookmark={bookmark}"
+        )
+    })
 }
 
 pub async fn scrape_public_pin_comments(
@@ -476,7 +515,10 @@ pub async fn scrape_public_pin_comments(
     // The comments resource needs an aggregated pin entity id, which is not the
     // same as the visible pin id. Pinterest embeds it in the public comments page.
     let aggregated = parse_aggregated_pin_data_from_html(&html).ok_or_else(|| {
-        anyhow!("Pinterest comments page did not expose aggregated pin data for pin {pin_id}")
+        let marker_found = html.contains("\"aggregatedPinData\":");
+        anyhow!(
+            "public Pinterest comments entity-id stage failed for pin {pin_id} at {final_url}: aggregatedPinData marker found={marker_found}, but entityId/comment metadata could not be parsed"
+        )
     })?;
     let mut summary = PublicPinComments {
         total_count: aggregated.comment_count,
@@ -517,20 +559,36 @@ pub async fn scrape_public_pin_comments(
     let response = request
         .send()
         .await
-        .with_context(|| format!("failed to fetch public Pinterest comments for {pin_url}"))?;
+        .with_context(|| {
+            format!(
+                "public Pinterest comments resource fetch stage failed for {pin_url}, aggregated_entity_id={}",
+                aggregated.entity_id
+            )
+        })?;
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         return Err(anyhow!(
-            "public Pinterest comments resource returned HTTP {status} for {pin_url}: {body}"
+            "public Pinterest comments resource HTTP stage failed for {pin_url}, aggregated_entity_id={}: ApiResource returned HTTP {status}: {body}",
+            aggregated.entity_id
         ));
     }
 
     let value = response
         .json::<Value>()
         .await
-        .with_context(|| format!("failed to parse public Pinterest comments for {pin_url}"))?;
-    summary.comments = parse_public_pin_comments_response(&value, max_comments)?;
+        .with_context(|| {
+            format!(
+                "public Pinterest comments resource JSON stage failed for {pin_url}, aggregated_entity_id={}",
+                aggregated.entity_id
+            )
+        })?;
+    summary.comments = parse_public_pin_comments_response(&value, max_comments).with_context(|| {
+        format!(
+            "public Pinterest comments resource_response stage failed for {pin_url}, aggregated_entity_id={}",
+            aggregated.entity_id
+        )
+    })?;
     info!(
         pin_id = pin_id,
         comments = summary.comments.len(),
@@ -810,26 +868,33 @@ fn public_profile_username(url: &Url) -> Option<String> {
 fn parse_public_profile_html(html: &str) -> Result<PublicProfilePinsPage> {
     let mut pins = Vec::new();
     let mut seen = BTreeSet::new();
-    let next_bookmark = parse_user_pins_resource_from_html(html, &mut pins, &mut seen);
+    let mut diagnostics = PublicProfileParseDiagnostics::default();
+    let next_bookmark =
+        parse_user_pins_resource_from_html(html, &mut pins, &mut seen, &mut diagnostics);
 
     if pins.is_empty() {
         // JSON-LD has less metadata and usually fewer pins, but it is useful when
         // Pinterest changes the embedded application state while keeping SEO data.
+        let before_json_ld = pins.len();
         for script in json_ld_scripts(html) {
+            diagnostics.json_ld_scripts += 1;
             let value = match serde_json::from_str::<Value>(script.trim()) {
                 Ok(value) => value,
                 Err(error) => {
+                    diagnostics.json_ld_parse_errors += 1;
                     warn!(error = %error, "failed to parse Pinterest JSON-LD script");
                     continue;
                 }
             };
             collect_json_ld_pins(&value, &mut pins, &mut seen);
         }
+        diagnostics.json_ld_pins = pins.len().saturating_sub(before_json_ld);
     }
 
     Ok(PublicProfilePinsPage {
         pins,
         next_bookmark,
+        diagnostics,
     })
 }
 
@@ -837,30 +902,46 @@ fn parse_user_pins_resource_from_html(
     html: &str,
     pins: &mut Vec<SavedPin>,
     seen: &mut BTreeSet<String>,
+    diagnostics: &mut PublicProfileParseDiagnostics,
 ) -> Option<String> {
     // Avoid scraping arbitrary JavaScript with regexes. We locate the resource
     // marker, then extract the balanced JSON object that starts immediately after it.
     let marker = "\"UserPinsResource\":";
-    let start = html.find(marker)? + marker.len();
-    let object = json_object_prefix(&html[start..])?;
+    let Some(start) = html.find(marker).map(|start| start + marker.len()) else {
+        return None;
+    };
+    diagnostics.user_pins_resource_marker_found = true;
+    let Some(object) = json_object_prefix(&html[start..]) else {
+        return None;
+    };
+    diagnostics.user_pins_resource_json_found = true;
     let resources = match serde_json::from_str::<Value>(object) {
         Ok(value) => value,
         Err(error) => {
+            diagnostics.user_pins_resource_parse_error = Some(error.to_string());
             warn!(error = %error, "failed to parse Pinterest UserPinsResource state");
             return None;
         }
     };
 
     let mut next_bookmark = None;
-    for resource in resources.as_object()?.values() {
+    let Some(resources) = resources.as_object() else {
+        diagnostics.user_pins_resource_parse_error =
+            Some("UserPinsResource state is not a JSON object".to_string());
+        return None;
+    };
+    diagnostics.user_pins_resource_objects = resources.len();
+    for resource in resources.values() {
         let Some(data) = resource.get("data").and_then(Value::as_array) else {
             continue;
         };
+        diagnostics.user_pins_resource_data_arrays += 1;
         let mut parsed = 0_usize;
         for pin in data.iter().filter_map(parse_public_profile_resource_pin) {
             parsed += 1;
             append_unique_pin(pins, seen, pin);
         }
+        diagnostics.user_pins_resource_pins += parsed;
         if parsed > 0 && next_bookmark.is_none() {
             next_bookmark = public_profile_next_bookmark(resource);
         }
@@ -894,7 +975,26 @@ fn parse_public_profile_pin_page_response(value: &Value) -> Result<PublicProfile
     Ok(PublicProfilePinsPage {
         pins,
         next_bookmark: public_profile_next_bookmark(response),
+        diagnostics: PublicProfileParseDiagnostics::default(),
     })
+}
+
+fn profile_parse_diagnostics(diagnostics: &PublicProfileParseDiagnostics) -> String {
+    let user_pins_error = diagnostics
+        .user_pins_resource_parse_error
+        .as_deref()
+        .unwrap_or("none");
+    format!(
+        "UserPinsResource marker_found={}, json_found={}, parse_error={user_pins_error:?}, objects={}, data_arrays={}, pins={}; JSON-LD scripts={}, parse_errors={}, pins={}",
+        diagnostics.user_pins_resource_marker_found,
+        diagnostics.user_pins_resource_json_found,
+        diagnostics.user_pins_resource_objects,
+        diagnostics.user_pins_resource_data_arrays,
+        diagnostics.user_pins_resource_pins,
+        diagnostics.json_ld_scripts,
+        diagnostics.json_ld_parse_errors,
+        diagnostics.json_ld_pins,
+    )
 }
 
 fn public_profile_next_bookmark(value: &Value) -> Option<String> {
@@ -1386,6 +1486,10 @@ mod tests {
 
         assert_eq!(page.pins.len(), 1);
         assert_eq!(page.next_bookmark, None);
+        assert_eq!(page.diagnostics.json_ld_scripts, 1);
+        assert_eq!(page.diagnostics.json_ld_parse_errors, 0);
+        assert_eq!(page.diagnostics.json_ld_pins, 1);
+        assert!(!page.diagnostics.user_pins_resource_marker_found);
         assert_eq!(page.pins[0].pin.id, "123456789");
         assert_eq!(page.pins[0].pin.title.as_deref(), Some("Example pin title"));
         assert_eq!(
@@ -1410,6 +1514,12 @@ mod tests {
 
         assert_eq!(page.next_bookmark.as_deref(), Some("bookmark-1"));
         assert_eq!(page.pins.len(), 1);
+        assert!(page.diagnostics.user_pins_resource_marker_found);
+        assert!(page.diagnostics.user_pins_resource_json_found);
+        assert_eq!(page.diagnostics.user_pins_resource_objects, 1);
+        assert_eq!(page.diagnostics.user_pins_resource_data_arrays, 1);
+        assert_eq!(page.diagnostics.user_pins_resource_pins, 2);
+        assert_eq!(page.diagnostics.json_ld_scripts, 0);
         let saved = &page.pins[0];
         assert_eq!(saved.pin.id, "111");
         assert_eq!(
@@ -1458,6 +1568,33 @@ mod tests {
             page.pins[0].pin.best_image_url(),
             Some("https://i.pinimg.com/474x/page2.jpg")
         );
+        assert_eq!(page.diagnostics, PublicProfileParseDiagnostics::default());
+    }
+
+    #[test]
+    fn records_public_profile_parser_stage_diagnostics() {
+        let html = r#"
+            <script type="application/ld+json">{invalid json</script>
+            <script>window.__PWS_DATA__ = {"resources": {"UserPinsResource": {"bad": []}}};</script>
+        "#;
+
+        let page = parse_public_profile_html(html).unwrap();
+
+        assert!(page.pins.is_empty());
+        assert!(page.diagnostics.user_pins_resource_marker_found);
+        assert!(page.diagnostics.user_pins_resource_json_found);
+        assert_eq!(page.diagnostics.user_pins_resource_objects, 1);
+        assert_eq!(page.diagnostics.user_pins_resource_data_arrays, 0);
+        assert_eq!(page.diagnostics.user_pins_resource_pins, 0);
+        assert_eq!(page.diagnostics.json_ld_scripts, 1);
+        assert_eq!(page.diagnostics.json_ld_parse_errors, 1);
+        assert_eq!(page.diagnostics.json_ld_pins, 0);
+
+        let rendered = profile_parse_diagnostics(&page.diagnostics);
+        assert!(rendered.contains("UserPinsResource marker_found=true"));
+        assert!(rendered.contains("data_arrays=0"));
+        assert!(rendered.contains("JSON-LD scripts=1"));
+        assert!(rendered.contains("parse_errors=1"));
     }
 
     #[test]
