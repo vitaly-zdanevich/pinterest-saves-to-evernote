@@ -43,14 +43,6 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
         .and_then(|section| section.name.as_deref().or(Some(section.id.as_str())));
     let board = field("Board", board);
     let section = field("Section", section);
-    let owner = field(
-        "Board owner",
-        saved
-            .pin
-            .board_owner
-            .as_ref()
-            .and_then(|owner| owner.username.as_deref()),
-    );
     let public_author = public_author_field(&saved.pin.extra);
     let public_comments = comments_section(&saved.pin.extra);
     let creative_type = field("Creative type", saved.pin.creative_type.as_deref());
@@ -80,7 +72,6 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
 {created_at}
 {board}
 {section}
-{owner}
 {public_author}
 {public_comments}
 {creative_type}
@@ -439,6 +430,7 @@ mod tests {
 
         assert!(!enml.contains("Pin ID"));
         assert!(!enml.contains("Pinterest pin"));
+        assert!(!enml.contains("Board owner"));
         assert!(enml.contains("A &lt; B"));
         assert!(enml.contains("Line &amp; 2"));
         assert!(enml.contains("https://example.com/?a=1&amp;b=2"));
