@@ -27,7 +27,7 @@ The hourly schedule is conservative for GitHub Actions reliability. If you use t
 
 The `sync` job keeps `state/state.json` in the GitHub Actions cache and uploads it as a workflow artifact after each run. This is enough for one personal scheduled job; do not run multiple schedules for the same Pinterest/Evernote account in parallel.
 
-The CI workflow in `.github/workflows/ci.yml` runs tests and SonarCloud analysis on push and pull requests. Both workflows opt into Node.js 24 for JavaScript actions.
+The CI workflow in `.github/workflows/ci.yml` runs tests and SonarCloud analysis on push and pull requests. The SonarCloud job generates Rust LCOV coverage with `cargo-llvm-cov` and imports `coverage/lcov.info`. Both workflows opt into Node.js 24 for JavaScript actions.
 
 ## Required GitHub Secrets
 

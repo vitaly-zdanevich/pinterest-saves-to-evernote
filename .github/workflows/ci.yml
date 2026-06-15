@@ -46,6 +46,17 @@ jobs:
         with:
           fetch-depth: 0 # Shallow clones should be disabled for a better relevancy of analysis
 
+      - name: Install Rust coverage toolchain
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component llvm-tools-preview
+          rustup default 1.95.0
+          cargo install cargo-llvm-cov --locked
+
+      - name: Generate Rust coverage
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov --locked --all-targets --lcov --output-path coverage/lcov.info
+
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0
         env:
