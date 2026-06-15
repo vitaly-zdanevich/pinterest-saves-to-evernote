@@ -2,7 +2,7 @@ use html_escape::{encode_double_quoted_attribute, encode_safe};
 use serde_json::{Map, Value};
 
 use crate::image::DownloadedImage;
-use crate::pinterest::SavedPin;
+use crate::pinterest::{PinterestBoard, SavedPin};
 
 const PROJECT_URL: &str = "https://github.com/vitaly-zdanevich/pinterest-saves-to-evernote";
 
@@ -27,15 +27,11 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
     let description = multiline_field("Description", saved.pin.description.as_deref());
     let alt_text = multiline_field("Alt text", saved.pin.alt_text.as_deref());
     let created_at = field("Created at", saved.pin.created_at.as_deref());
-    let board = saved
-        .board
-        .as_ref()
-        .and_then(|board| board.name.as_deref().or(Some(board.id.as_str())));
     let section = saved
         .section
         .as_ref()
         .and_then(|section| section.name.as_deref().or(Some(section.id.as_str())));
-    let board = field("Board", board);
+    let board = board_field(saved.board.as_ref());
     let section = field("Section", section);
     let public_author = public_author_field(&saved.pin.extra);
     let public_comments = comments_section(&saved.pin.extra);
@@ -78,6 +74,29 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
 
 fn extra_string<'a>(extra: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     extra.get(key).and_then(Value::as_str)
+}
+
+fn board_field(board: Option<&PinterestBoard>) -> String {
+    let Some(board) = board else {
+        return String::new();
+    };
+    let name = board.name.as_deref().unwrap_or(board.id.as_str());
+
+    match board_url(board) {
+        Some(url) => link_text_field("Board", &url, name),
+        None => field("Board", Some(name)),
+    }
+}
+
+fn board_url(board: &PinterestBoard) -> Option<String> {
+    let url = extra_string(&board.extra, "url")?;
+    if url.starts_with("https://www.pinterest.com/") {
+        Some(url.to_string())
+    } else if url.starts_with('/') {
+        Some(format!("https://www.pinterest.com{url}"))
+    } else {
+        None
+    }
 }
 
 fn public_author_field(extra: &Map<String, Value>) -> String {
@@ -414,7 +433,10 @@ mod tests {
             board: Some(PinterestBoard {
                 id: "board-1".to_string(),
                 name: Some("Ideas".to_string()),
-                extra: Map::new(),
+                extra: Map::from_iter([(
+                    "url".to_string(),
+                    Value::String("/vitalyzdanevich/ideas/".to_string()),
+                )]),
             }),
             section: None,
         };
@@ -430,6 +452,7 @@ mod tests {
         assert!(enml.contains("https://example.com/?a=1&amp;b=2"));
         assert!(enml.contains("Alt &gt; text"));
         assert!(enml.contains("Ideas"));
+        assert!(enml.contains("https://www.pinterest.com/vitalyzdanevich/ideas/"));
         assert!(enml.contains("Author &lt;Name&gt;"));
         assert!(enml.contains("https://www.pinterest.com/author_user/"));
         assert!(enml.contains("Pinterest comments"));
