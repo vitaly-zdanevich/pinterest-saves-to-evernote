@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result};
 use chrono::Utc;
 use tokio::task;
@@ -121,6 +123,7 @@ async fn export_pin(
     }
 
     let title = note::title(&saved);
+    let tags = merged_note_tags(&settings.evernote_tags, note::title_hashtags(&saved));
     let image_url = saved.pin.best_image_url().map(ToOwned::to_owned);
     let image =
         if let (Some(downloader), Some(image_url)) = (image_downloader, image_url.as_deref()) {
@@ -136,6 +139,7 @@ async fn export_pin(
             pin_id = saved.pin.id,
             title = title,
             pin_url = pin_url,
+            tags = ?tags,
             image_attached = image.is_some(),
             "dry-run: would create Evernote note"
         );
@@ -143,14 +147,21 @@ async fn export_pin(
     }
 
     let image_attached = image.is_some();
-    let guid =
-        create_evernote_note_blocking(settings, title.clone(), content, image, pin_url.clone())
-            .await?;
+    let guid = create_evernote_note_blocking(
+        settings,
+        title.clone(),
+        content,
+        image,
+        pin_url.clone(),
+        tags.clone(),
+    )
+    .await?;
     info!(
         pin_id = saved.pin.id,
         evernote_guid = guid,
         title = title,
         pin_url = pin_url,
+        tags = ?tags,
         image_attached = image_attached,
         "created Evernote note"
     );
@@ -166,13 +177,13 @@ async fn create_evernote_note_blocking(
     content: String,
     image: Option<crate::image::DownloadedImage>,
     pin_url: String,
+    tags: Vec<String>,
 ) -> Result<String> {
     let token = settings.evernote_auth_token.clone();
     let user_store_url = settings.evernote_user_store_url.clone();
     let note_store_url = settings.evernote_note_store_url.clone();
     let notebook_guid = settings.evernote_notebook_guid.clone();
     let notebook_name = settings.evernote_notebook_name.clone();
-    let tags = settings.evernote_tags.clone();
     let source_url = pin_url.clone();
 
     task::spawn_blocking(move || {
@@ -188,4 +199,47 @@ async fn create_evernote_note_blocking(
     })
     .await
     .context("Evernote worker task panicked or was cancelled")?
+}
+
+fn merged_note_tags(base_tags: &[String], title_tags: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut tags = Vec::new();
+
+    for tag in base_tags.iter().chain(title_tags.iter()) {
+        let tag = tag.trim();
+        if tag.is_empty() {
+            continue;
+        }
+        if seen.insert(tag.to_lowercase()) {
+            tags.push(tag.to_string());
+        }
+    }
+
+    tags
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merges_configured_and_title_tags_without_duplicates() {
+        let tags = merged_note_tags(
+            &["pinterest".to_string(), "nostalgia".to_string()],
+            vec![
+                "olderbrothercore".to_string(),
+                "nostalgia".to_string(),
+                "OlderBrotherCore".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            tags,
+            vec![
+                "pinterest".to_string(),
+                "nostalgia".to_string(),
+                "olderbrothercore".to_string(),
+            ]
+        );
+    }
 }

@@ -5,18 +5,29 @@ use crate::image::DownloadedImage;
 use crate::pinterest::SavedPin;
 
 pub fn title(saved: &SavedPin) -> String {
-    let raw = saved
+    let raw = saved.pin.title.as_deref();
+    let title = raw
+        .and_then(clean_title_without_hashtags)
+        .unwrap_or_else(|| "Pinterest pin".to_string());
+    truncate_title(&title)
+}
+
+pub fn title_hashtags(saved: &SavedPin) -> Vec<String> {
+    saved
         .pin
         .title
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("Pinterest pin");
-    truncate_title(raw)
+        .map(hashtags_from_text)
+        .unwrap_or_default()
 }
 
 pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
-    let title = field("Title", saved.pin.title.as_deref());
+    let clean_title = saved
+        .pin
+        .title
+        .as_deref()
+        .and_then(clean_title_without_hashtags);
+    let title = field("Title", clean_title.as_deref());
     let description = multiline_field("Description", saved.pin.description.as_deref());
     let alt_text = multiline_field("Alt text", saved.pin.alt_text.as_deref());
     let created_at = field("Created at", saved.pin.created_at.as_deref());
@@ -216,6 +227,86 @@ fn link_text_field(label: &str, url: &str, text: &str) -> String {
     )
 }
 
+fn clean_title_without_hashtags(raw: &str) -> Option<String> {
+    let ranges = hashtag_ranges(raw);
+    let mut cleaned = String::with_capacity(raw.len());
+    let mut offset = 0;
+
+    for (range, _) in ranges {
+        cleaned.push_str(&raw[offset..range.start]);
+        offset = range.end;
+    }
+    cleaned.push_str(&raw[offset..]);
+
+    clean_title_separators(&cleaned)
+}
+
+fn hashtags_from_text(raw: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    for (_, tag) in hashtag_ranges(raw) {
+        if !tags.iter().any(|existing| existing == &tag) {
+            tags.push(tag);
+        }
+    }
+    tags
+}
+
+fn hashtag_ranges(raw: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    let positions = raw.char_indices().collect::<Vec<_>>();
+    let mut ranges = Vec::new();
+    let mut index = 0;
+
+    while index < positions.len() {
+        let (start, character) = positions[index];
+        if character != '#' {
+            index += 1;
+            continue;
+        }
+
+        let mut end_index = index + 1;
+        let mut tag = String::new();
+        while end_index < positions.len() {
+            let (_, character) = positions[end_index];
+            if !is_hashtag_character(character) {
+                break;
+            }
+            tag.extend(character.to_lowercase());
+            end_index += 1;
+        }
+
+        if tag.is_empty() {
+            index += 1;
+            continue;
+        }
+
+        let end = positions
+            .get(end_index)
+            .map(|(offset, _)| *offset)
+            .unwrap_or(raw.len());
+        ranges.push((start..end, tag));
+        index = end_index;
+    }
+
+    ranges
+}
+
+fn is_hashtag_character(character: char) -> bool {
+    character == '_' || character.is_alphanumeric()
+}
+
+fn clean_title_separators(raw: &str) -> Option<String> {
+    let cleaned = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cleaned = cleaned
+        .trim_matches(|character| matches!(character, '|' | '-' | ',' | ':' | ';' | '/' | '\\'))
+        .trim();
+
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned.to_string())
+    }
+}
+
 fn truncate_title(raw: &str) -> String {
     const MAX_TITLE_CHARS: usize = 250;
     let mut title = raw.trim().replace(['\n', '\r'], " ");
@@ -234,6 +325,54 @@ mod tests {
 
     use super::*;
     use crate::pinterest::{PinterestBoard, PinterestPin};
+
+    fn saved_pin_with_title(title: &str) -> SavedPin {
+        SavedPin {
+            pin: PinterestPin {
+                id: "123".to_string(),
+                title: Some(title.to_string()),
+                description: None,
+                link: None,
+                created_at: None,
+                board_id: None,
+                board_section_id: None,
+                board_owner: None,
+                parent_pin_id: None,
+                alt_text: None,
+                creative_type: None,
+                media: None,
+                extra: Map::new(),
+            },
+            board: None,
+            section: None,
+        }
+    }
+
+    #[test]
+    fn extracts_hashtags_from_title_and_drops_them_from_title() {
+        let saved = saved_pin_with_title(
+            "#olderbrothercore #olderbrother #nostalgia | Y2k older brother core wallpaper, Older brother corr, Nostalgic",
+        );
+
+        assert_eq!(
+            title(&saved),
+            "Y2k older brother core wallpaper, Older brother corr, Nostalgic"
+        );
+        assert_eq!(
+            title_hashtags(&saved),
+            vec![
+                "olderbrothercore".to_string(),
+                "olderbrother".to_string(),
+                "nostalgia".to_string(),
+            ]
+        );
+
+        let enml = enml(&saved, None);
+        assert!(enml.contains("Y2k older brother core wallpaper"));
+        assert!(!enml.contains("#olderbrothercore"));
+        assert!(!enml.contains("#olderbrother"));
+        assert!(!enml.contains("#nostalgia"));
+    }
 
     #[test]
     fn renders_enml_with_escaped_values() {
