@@ -45,8 +45,6 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
     let image_url = saved.pin.best_image_url();
     let image_url_row = link_field("Image URL", image_url);
     let source_link = link_field("Source link", saved.pin.link.as_deref());
-    let pin_url = saved.pin.pin_url();
-    let pin_link = link_field("Pinterest pin", Some(&pin_url));
     let image_markup = image
         .map(|image| {
             let mime_type = encode_double_quoted_attribute(&image.mime_type);
@@ -73,7 +71,6 @@ pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
 {public_comments}
 {creative_type}
 {parent_pin}
-{pin_link}
 {source_link}
 {image_url_row}
 </en-note>"#
@@ -290,6 +287,7 @@ mod tests {
         let enml = enml(&saved, None);
 
         assert!(!enml.contains("Pin ID"));
+        assert!(!enml.contains("Pinterest pin"));
         assert!(enml.contains("A &lt; B"));
         assert!(enml.contains("Line &amp; 2"));
         assert!(enml.contains("https://example.com/?a=1&amp;b=2"));
