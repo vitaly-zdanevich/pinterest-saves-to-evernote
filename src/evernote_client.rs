@@ -21,6 +21,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 type InputProtocol<C> = TBinaryInputProtocol<ReadHalf<ThriftHttpChannel<C>>>;
 type OutputProtocol<C> = TBinaryOutputProtocol<WriteHalf<ThriftHttpChannel<C>>>;
 
+/// Minimal HTTP abstraction used by the Evernote Thrift transport.
+///
+/// The production implementation uses blocking reqwest; tests can provide a fake
+/// client without opening sockets.
 pub trait ThriftHttpClient: Clone + Send + Sync + 'static {
     fn post_thrift(&self, url: &str, body: Vec<u8>) -> Result<Vec<u8>, String>;
 }
@@ -127,6 +131,8 @@ where
         image: Option<&DownloadedImage>,
         source_url: String,
     ) -> Result<String> {
+        // Evernote accepts either no notebook GUID, which means the default
+        // notebook, or an explicit target notebook GUID.
         let notebook_guid = self.target_notebook_guid()?;
         let mut client = self.note_store_client()?;
         let resources = image
@@ -174,6 +180,8 @@ where
             return Ok(None);
         }
 
+        // Evernote's createNote endpoint needs a GUID, not a notebook name.
+        // Resolve names lazily so users can configure the friendlier name in CI.
         let mut client = self.note_store_client()?;
         let notebooks = client
             .list_notebooks(self.token.clone())
@@ -251,6 +259,8 @@ where
             return Ok(url);
         }
 
+        // The NoteStore URL is account-specific. If the user did not provide it,
+        // discover it once through UserStore and cache it for the process lifetime.
         let mut client = self.user_store_client()?;
         let version_ok = client
             .check_version(
@@ -285,6 +295,8 @@ fn normalize_notebook_name(name: &str) -> String {
 }
 
 fn image_resource(image: &DownloadedImage) -> types::Resource {
+    // Evernote identifies embedded resources by the MD5 body hash referenced from
+    // ENML's <en-media> tag, so the same hash must be sent with the resource data.
     types::Resource {
         data: Some(types::Data {
             body_hash: Some(image.hash.clone()),
@@ -320,6 +332,9 @@ struct ThriftHttpState {
     write_bytes: Vec<u8>,
 }
 
+// The thrift crate expects an io::Read + io::Write transport. Each `flush` sends
+// the accumulated Thrift request body over HTTP, then stores the response bytes for
+// the paired reader.
 impl<C> ThriftHttpChannel<C>
 where
     C: ThriftHttpClient,

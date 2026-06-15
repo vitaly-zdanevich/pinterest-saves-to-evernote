@@ -9,9 +9,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct State {
+    /// Pinterest pin ids that were already baseline-marked or exported to Evernote.
     #[serde(default)]
     pub processed_pin_ids: BTreeSet<String>,
+    /// Set on the first successful baseline/import run.
     pub initialized_at: Option<DateTime<Utc>>,
+    /// Updated after a successful sync, including runs with no new pins.
     pub last_successful_sync_at: Option<DateTime<Utc>>,
 }
 
@@ -37,6 +40,8 @@ impl State {
             })?;
         }
 
+        // Write through a temporary file in the target directory so GitHub Actions
+        // cache restores never leave a partially written JSON state file.
         let mut temp = tempfile::NamedTempFile::new_in(
             path.parent()
                 .filter(|parent| !parent.as_os_str().is_empty())

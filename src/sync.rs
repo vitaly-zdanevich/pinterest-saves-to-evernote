@@ -27,6 +27,9 @@ pub async fn run(settings: Settings) -> Result<()> {
     };
 
     if using_public_profile && state.is_initialized() && !settings.backfill_existing {
+        // The public profile feed is chronological newest-first. Once we reach a
+        // pin that is already in state, older entries on later pages were already
+        // seen too, so stop before exporting duplicates.
         if let Some(first_processed_index) = saved_pins
             .iter()
             .position(|saved| state.contains(&saved.pin.id))
@@ -42,6 +45,8 @@ pub async fn run(settings: Settings) -> Result<()> {
     }
 
     saved_pins.sort_by(|left, right| {
+        // Export oldest-to-newest so Evernote note order follows the original save
+        // order when a run imports several new pins at once.
         left.pin
             .created_at_utc()
             .cmp(&right.pin.created_at_utc())
@@ -49,6 +54,8 @@ pub async fn run(settings: Settings) -> Result<()> {
     });
 
     if !state.is_initialized() && !settings.backfill_existing {
+        // First run establishes a baseline only. Without this guard, enabling the
+        // workflow would import every old saved pin in the account/profile.
         info!(
             pins = saved_pins.len(),
             "first run baseline: marking existing Pinterest pins as already processed"
@@ -112,6 +119,8 @@ async fn export_pin(
     mut saved: SavedPin,
 ) -> Result<()> {
     if settings.scrape_pin_comments {
+        // Comment scraping is best-effort because it depends on Pinterest's public
+        // web endpoints. A comments failure must not block exporting the pin itself.
         match scrape_public_pin_comments(&saved.pin.id, settings.max_pin_comments).await {
             Ok(comments) => comments.attach_to_extra(&mut saved.pin.extra),
             Err(error) => warn!(
@@ -179,6 +188,9 @@ async fn create_evernote_note_blocking(
     pin_url: String,
     tags: Vec<String>,
 ) -> Result<String> {
+    // The Evernote Thrift client and reqwest transport are synchronous. Running
+    // them in a blocking task prevents Tokio from panicking when the runtime is
+    // dropped from inside an async context.
     let token = settings.evernote_auth_token.clone();
     let user_store_url = settings.evernote_user_store_url.clone();
     let note_store_url = settings.evernote_note_store_url.clone();

@@ -47,6 +47,8 @@ impl ImageDownloader {
             ));
         }
 
+        // Check Content-Length before reading the body, then check the decoded body
+        // size again because servers may omit or misreport the header.
         if let Some(content_length) = response.content_length()
             && content_length > self.max_bytes
         {
@@ -84,6 +86,7 @@ impl ImageDownloader {
             ));
         }
 
+        // Evernote resources are referenced from ENML by MD5 digest.
         let digest = md5::compute(&bytes);
         let hash = digest.0.to_vec();
         let hash_hex = format!("{digest:x}");

@@ -6,6 +6,9 @@ use crate::pinterest::{PinterestBoard, SavedPin};
 
 const PROJECT_URL: &str = "https://github.com/vitaly-zdanevich/pinterest-saves-to-evernote";
 
+/// Build the Evernote note title from Pinterest metadata.
+///
+/// Hashtags are removed from the title because they are exported as Evernote tags.
 pub fn title(saved: &SavedPin) -> String {
     let raw = saved.pin.title.as_deref();
     let title = raw
@@ -24,6 +27,8 @@ pub fn title_hashtags(saved: &SavedPin) -> Vec<String> {
 }
 
 pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
+    // Evernote stores note bodies as ENML, an XHTML subset. Every value that comes
+    // from Pinterest must be escaped before being inserted into the document.
     let description = multiline_field("Description", saved.pin.description.as_deref());
     let alt_text = multiline_field("Alt text", saved.pin.alt_text.as_deref());
     let section = saved
@@ -139,6 +144,8 @@ fn comments_section(extra: &Map<String, Value>) -> String {
         return String::new();
     }
 
+    // Show when Pinterest reports more comments than the scraper imported. This
+    // makes MAX_PIN_COMMENTS truncation visible without creating a huge note.
     let label = match (total_count, comments.len()) {
         (Some(total), scraped) if scraped > 0 && total > scraped as u64 => {
             format!("{scraped} scraped of {total}")
@@ -213,6 +220,8 @@ fn comment_author_markup(comment: &Map<String, Value>) -> Option<String> {
         }
     }
 
+    // Public scraping sometimes returns only a numeric user id. That id is not a
+    // username and the public site does not expose a reliable id-to-profile lookup.
     None
 }
 
@@ -300,6 +309,8 @@ fn hashtags_from_text(raw: &str) -> Vec<String> {
 }
 
 fn hashtag_ranges(raw: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    // Return byte ranges so callers can remove tags from the original UTF-8 string
+    // without corrupting non-ASCII titles.
     let positions = raw.char_indices().collect::<Vec<_>>();
     let mut ranges = Vec::new();
     let mut index = 0;

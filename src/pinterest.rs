@@ -71,6 +71,8 @@ pub struct PinterestImage {
 
 impl PinterestImage {
     fn area(&self) -> u64 {
+        // Pinterest usually returns several named image sizes. Prefer the largest
+        // available image when attaching media to Evernote.
         self.width
             .unwrap_or(0)
             .saturating_mul(self.height.unwrap_or(0))
@@ -189,6 +191,8 @@ pub struct PublicPinComments {
 
 impl PublicPinComments {
     pub fn attach_to_extra(&self, extra: &mut Map<String, Value>) {
+        // Notes are rendered from SavedPin only, so scraped comment data is carried
+        // through the same `extra` map used for fields not present in the official API.
         if let Some(total_count) = self.total_count {
             extra.insert("public_comment_count".to_string(), Value::from(total_count));
         }
@@ -247,6 +251,8 @@ struct PublicProfilePinsPage {
 }
 
 pub async fn resolve_access_token(settings: &Settings) -> Result<String> {
+    // Prefer refresh-token based auth when configured. It lets scheduled CI runs
+    // continue after a short-lived Pinterest access token expires.
     if settings.can_refresh_pinterest_token() {
         let token = refresh_access_token(settings).await?;
         return Ok(token);
@@ -298,6 +304,8 @@ pub async fn public_profile_saved_pins(settings: &Settings) -> Result<Vec<SavedP
     let html = response.text().await.with_context(|| {
         format!("failed to read public Pinterest profile HTML from {final_url}")
     })?;
+    // The first page is real HTML. It normally contains Pinterest's embedded
+    // UserPinsResource state; JSON-LD is kept as a weaker fallback.
     let mut page = parse_public_profile_html(&html)?;
     let username = public_profile_username(&final_url)
         .or_else(|| public_profile_username(&url))
@@ -316,6 +324,9 @@ pub async fn public_profile_saved_pins(settings: &Settings) -> Result<Vec<SavedP
     let source_url = format!("/{username}/");
     let referer = final_url.to_string();
 
+    // Later pages use the same resource endpoint Pinterest's web app calls.
+    // Reusing response cookies keeps the request close to the browser flow and
+    // avoids needing a logged-in session.
     for page_number in 2..=settings.public_profile_max_pages {
         let Some(bookmark) = page.next_bookmark.take() else {
             break;
@@ -374,6 +385,9 @@ async fn fetch_public_profile_pin_page(
     bookmark: &str,
     cookie_header: Option<HeaderValue>,
 ) -> Result<PublicProfilePinsPage> {
+    // This is an internal Pinterest web resource, not the documented API. Keep
+    // the options and headers close to the browser request shape because this
+    // endpoint is more brittle than the official API.
     let data = serde_json::json!({
         "options": {
             "add_vase": true,
@@ -459,6 +473,8 @@ pub async fn scrape_public_pin_comments(
     let html = page_response.text().await.with_context(|| {
         format!("failed to read public Pinterest comments page HTML from {final_url}")
     })?;
+    // The comments resource needs an aggregated pin entity id, which is not the
+    // same as the visible pin id. Pinterest embeds it in the public comments page.
     let aggregated = parse_aggregated_pin_data_from_html(&html).ok_or_else(|| {
         anyhow!("Pinterest comments page did not expose aggregated pin data for pin {pin_id}")
     })?;
@@ -471,6 +487,9 @@ pub async fn scrape_public_pin_comments(
         return Ok(summary);
     }
 
+    // The public response may include only numeric user ids for commenters.
+    // Rendering code intentionally ignores those ids unless a username or URL is
+    // also present, because the public scraper has no reliable id-to-profile map.
     let data = serde_json::json!({
         "options": {
             "url": format!("/v3/aggregated_pin_data/{}/comments/", aggregated.entity_id),
@@ -601,6 +620,8 @@ impl PinterestClient {
             PinterestFetchMode::Boards => self.board_pins(settings).await?,
         };
 
+        // Board and section scans can return the same pin multiple times.
+        // The pin id is the stable idempotency key used by both sync state and notes.
         let mut deduped = BTreeMap::<String, SavedPin>::new();
         for pin in pins {
             deduped.entry(pin.dedupe_key()).or_insert(pin);
@@ -792,6 +813,8 @@ fn parse_public_profile_html(html: &str) -> Result<PublicProfilePinsPage> {
     let next_bookmark = parse_user_pins_resource_from_html(html, &mut pins, &mut seen);
 
     if pins.is_empty() {
+        // JSON-LD has less metadata and usually fewer pins, but it is useful when
+        // Pinterest changes the embedded application state while keeping SEO data.
         for script in json_ld_scripts(html) {
             let value = match serde_json::from_str::<Value>(script.trim()) {
                 Ok(value) => value,
@@ -815,6 +838,8 @@ fn parse_user_pins_resource_from_html(
     pins: &mut Vec<SavedPin>,
     seen: &mut BTreeSet<String>,
 ) -> Option<String> {
+    // Avoid scraping arbitrary JavaScript with regexes. We locate the resource
+    // marker, then extract the balanced JSON object that starts immediately after it.
     let marker = "\"UserPinsResource\":";
     let start = html.find(marker)? + marker.len();
     let object = json_object_prefix(&html[start..])?;
@@ -896,6 +921,8 @@ fn parse_public_profile_resource_pin(value: &Value) -> Option<SavedPin> {
             username: Some(username),
             extra: Map::new(),
         });
+    // Public profile data uses a different schema from API v5. Normalize the
+    // fields we care about into PinterestPin and keep supplemental values in extra.
     let mut extra = Map::new();
     if let Some(author) = nested_string_field(value, &["origin_pinner", "full_name"])
         .or_else(|| nested_string_field(value, &["origin_pinner", "username"]))
@@ -1003,6 +1030,8 @@ fn parse_aggregated_pin_data_from_html(html: &str) -> Option<AggregatedPinData> 
 }
 
 fn json_object_prefix(raw: &str) -> Option<&str> {
+    // Pinterest embeds JSON inside larger JavaScript payloads. This scanner returns
+    // the first complete object while respecting quoted braces and escapes.
     let raw = raw.trim_start();
     if !raw.starts_with('{') {
         return None;
@@ -1087,6 +1116,9 @@ fn pinterest_error_message(error: &Value) -> String {
 }
 
 fn response_cookie_header(headers: &HeaderMap) -> Option<HeaderValue> {
+    // Convert Set-Cookie headers from the initial HTML response into one Cookie
+    // header for subsequent resource calls. Attributes such as Path and Expires
+    // must not be copied into the request header.
     let cookie = headers
         .get_all(SET_COOKIE)
         .iter()
