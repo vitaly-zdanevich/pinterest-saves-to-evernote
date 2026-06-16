@@ -182,10 +182,15 @@ fn comment_row(comment: &Map<String, Value>) -> Option<String> {
     if let Some(created_at) = extra_string(comment, "created_at") {
         metadata.push(encode_safe(created_at).to_string());
     }
-    let label = if metadata.is_empty() {
-        "<b>Comment</b>".to_string()
+    let label_text = if extra_string(comment, "parent_comment_id").is_some() {
+        "Reply"
     } else {
-        format!("<b>Comment</b> ({})", metadata.join(", "))
+        "Comment"
+    };
+    let label = if metadata.is_empty() {
+        format!("<b>{label_text}</b>")
+    } else {
+        format!("<b>{label_text}</b> ({})", metadata.join(", "))
     };
     let body = text
         .lines()
@@ -521,6 +526,25 @@ mod tests {
         comment.insert("text".to_string(), Value::String("   ".to_string()));
 
         assert!(comment_row(&comment).is_none());
+    }
+
+    #[test]
+    fn renders_comment_replies_without_parent_id() {
+        let mut comment = Map::new();
+        comment.insert(
+            "text".to_string(),
+            Value::String("Nested reply".to_string()),
+        );
+        comment.insert(
+            "parent_comment_id".to_string(),
+            Value::String("2916023393059841600".to_string()),
+        );
+
+        let row = comment_row(&comment).expect("comment row");
+
+        assert!(row.contains("<b>Reply</b>"));
+        assert!(row.contains("Nested reply"));
+        assert!(!row.contains("2916023393059841600"));
     }
 
     #[test]

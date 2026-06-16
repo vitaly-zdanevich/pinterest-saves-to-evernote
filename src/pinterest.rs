@@ -176,6 +176,7 @@ pub struct PublicPinComment {
     pub id: Option<String>,
     pub text: String,
     pub created_at: Option<String>,
+    pub parent_comment_id: Option<String>,
     pub user_id: Option<String>,
     pub user_username: Option<String>,
     pub user_full_name: Option<String>,
@@ -212,6 +213,12 @@ impl PublicPinComments {
                 value.insert("text".to_string(), Value::String(comment.text.clone()));
                 if let Some(created_at) = &comment.created_at {
                     value.insert("created_at".to_string(), Value::String(created_at.clone()));
+                }
+                if let Some(parent_comment_id) = &comment.parent_comment_id {
+                    value.insert(
+                        "parent_comment_id".to_string(),
+                        Value::String(parent_comment_id.clone()),
+                    );
                 }
                 if let Some(user_id) = &comment.user_id {
                     value.insert("user_id".to_string(), Value::String(user_id.clone()));
@@ -552,8 +559,8 @@ pub async fn scrape_public_pin_comments(
         .header(USER_AGENT, CLIENT_NAME)
         .header(REFERER, &comments_url)
         .query(&[("source_url", source_url.as_str()), ("data", data.as_str())]);
-    if let Some(cookie_header) = cookie_header {
-        request = request.header(COOKIE, cookie_header);
+    if let Some(cookie_header) = &cookie_header {
+        request = request.header(COOKIE, cookie_header.clone());
     }
 
     let response = request
@@ -583,12 +590,21 @@ pub async fn scrape_public_pin_comments(
                 aggregated.entity_id
             )
         })?;
-    summary.comments = parse_public_pin_comments_response(&value, max_comments).with_context(|| {
-        format!(
-            "public Pinterest comments resource_response stage failed for {pin_url}, aggregated_entity_id={}",
-            aggregated.entity_id
-        )
-    })?;
+    let top_level_comments =
+        parse_public_pin_comments_response(&value, max_comments).with_context(|| {
+            format!(
+                "public Pinterest comments resource_response stage failed for {pin_url}, aggregated_entity_id={}",
+                aggregated.entity_id
+            )
+        })?;
+    summary.comments = fetch_public_pin_comment_replies_for_top_level(
+        &client,
+        pin_id,
+        top_level_comments,
+        max_comments,
+        cookie_header,
+    )
+    .await;
     info!(
         pin_id = pin_id,
         comments = summary.comments.len(),
@@ -596,6 +612,117 @@ pub async fn scrape_public_pin_comments(
         "scraped public Pinterest comments"
     );
     Ok(summary)
+}
+
+async fn fetch_public_pin_comment_replies_for_top_level(
+    client: &reqwest::Client,
+    pin_id: &str,
+    top_level_comments: Vec<PublicPinComment>,
+    max_comments: usize,
+    cookie_header: Option<HeaderValue>,
+) -> Vec<PublicPinComment> {
+    let mut comments = Vec::new();
+    for comment in top_level_comments {
+        if comments.len() >= max_comments {
+            break;
+        }
+        let parent_comment_id = comment.id.clone();
+        let reply_count = comment.reply_count.unwrap_or(0);
+        comments.push(comment);
+        let remaining = max_comments.saturating_sub(comments.len());
+        if remaining == 0 {
+            break;
+        }
+        let Some(parent_comment_id) = parent_comment_id else {
+            continue;
+        };
+        if reply_count == 0 {
+            continue;
+        }
+
+        match fetch_public_pin_comment_replies(
+            client,
+            pin_id,
+            &parent_comment_id,
+            remaining,
+            cookie_header.clone(),
+        )
+        .await
+        {
+            Ok(replies) => comments.extend(replies),
+            Err(error) => warn!(
+                pin_id = pin_id,
+                parent_comment_id = parent_comment_id,
+                error = %error,
+                "failed to scrape public Pinterest comment replies; continuing without replies"
+            ),
+        }
+    }
+    comments
+}
+
+async fn fetch_public_pin_comment_replies(
+    client: &reqwest::Client,
+    pin_id: &str,
+    parent_comment_id: &str,
+    max_replies: usize,
+    cookie_header: Option<HeaderValue>,
+) -> Result<Vec<PublicPinComment>> {
+    let comments_url = format!("https://www.pinterest.com/pin/{pin_id}/comments/");
+    let comment_url =
+        format!("https://www.pinterest.com/pin/{pin_id}/comments/{parent_comment_id}/");
+    let source_url = format!("/pin/{pin_id}/comments/{parent_comment_id}/");
+    let data = serde_json::json!({
+        "options": {
+            "url": format!("/v3/aggregated_comments/{parent_comment_id}/replies/"),
+            "data": {}
+        },
+        "context": {}
+    })
+    .to_string();
+    let resource_url = Url::parse("https://www.pinterest.com/resource/ApiResource/get/")
+        .context("invalid Pinterest comment replies resource URL")?;
+
+    let mut request = client
+        .get(resource_url)
+        .header(ACCEPT, "application/json, text/javascript, */*; q=0.01")
+        .header("X-Requested-With", "XMLHttpRequest")
+        .header("X-Pinterest-AppState", "active")
+        .header(
+            "X-Pinterest-PWS-Handler",
+            "www/pin/[id]/comments/[comment_id]",
+        )
+        .header(USER_AGENT, CLIENT_NAME)
+        .header(REFERER, &comment_url)
+        .query(&[("source_url", source_url.as_str()), ("data", data.as_str())]);
+    if let Some(cookie_header) = cookie_header {
+        request = request.header(COOKIE, cookie_header);
+    }
+
+    let response = request.send().await.with_context(|| {
+        format!(
+            "public Pinterest comment replies fetch stage failed for pin {pin_id}, parent_comment_id={parent_comment_id}"
+        )
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "public Pinterest comment replies HTTP stage failed for pin {pin_id}, parent_comment_id={parent_comment_id}: ApiResource returned HTTP {status}: {body}"
+        ));
+    }
+
+    let value = response.json::<Value>().await.with_context(|| {
+        format!(
+            "public Pinterest comment replies JSON stage failed for pin {pin_id}, parent_comment_id={parent_comment_id}"
+        )
+    })?;
+    parse_public_pin_comment_replies_response(&value, max_replies, parent_comment_id)
+        .with_context(|| {
+            format!(
+                "public Pinterest comment replies resource_response stage failed for pin {pin_id}, parent_comment_id={parent_comment_id}, referer={comments_url}"
+            )
+        })
 }
 
 async fn refresh_access_token(settings: &Settings) -> Result<String> {
@@ -1173,6 +1300,22 @@ fn parse_public_pin_comments_response(
     value: &Value,
     max_comments: usize,
 ) -> Result<Vec<PublicPinComment>> {
+    parse_public_pin_comments_response_with_parent(value, max_comments, None)
+}
+
+fn parse_public_pin_comment_replies_response(
+    value: &Value,
+    max_replies: usize,
+    parent_comment_id: &str,
+) -> Result<Vec<PublicPinComment>> {
+    parse_public_pin_comments_response_with_parent(value, max_replies, Some(parent_comment_id))
+}
+
+fn parse_public_pin_comments_response_with_parent(
+    value: &Value,
+    max_comments: usize,
+    parent_comment_id: Option<&str>,
+) -> Result<Vec<PublicPinComment>> {
     let response = value
         .get("resource_response")
         .ok_or_else(|| anyhow!("Pinterest comments response has no resource_response"))?;
@@ -1190,17 +1333,23 @@ fn parse_public_pin_comments_response(
 
     Ok(data
         .iter()
-        .filter_map(parse_public_pin_comment)
+        .filter_map(|comment| parse_public_pin_comment(comment, parent_comment_id))
         .take(max_comments)
         .collect())
 }
 
-fn parse_public_pin_comment(value: &Value) -> Option<PublicPinComment> {
+fn parse_public_pin_comment(
+    value: &Value,
+    parent_comment_id: Option<&str>,
+) -> Option<PublicPinComment> {
     let text = string_field(value, "text")?;
     Some(PublicPinComment {
         id: string_field(value, "id"),
         text,
         created_at: string_field(value, "created_at"),
+        parent_comment_id: parent_comment_id
+            .map(str::to_string)
+            .or_else(|| string_field(value, "parent_comment_id")),
         user_id: nested_string_field(value, &["user", "id"]),
         user_username: nested_string_field(value, &["user", "username"]),
         user_full_name: nested_string_field(value, &["user", "full_name"]),
@@ -1825,11 +1974,47 @@ mod tests {
                 id: Some("comment-1".to_string()),
                 text: "Hello <world>".to_string(),
                 created_at: Some("Mon, 15 Jun 2026 10:00:00 +0000".to_string()),
+                parent_comment_id: None,
                 user_id: Some("user-1".to_string()),
                 user_username: Some("commenter".to_string()),
                 user_full_name: Some("Commenter Name".to_string()),
                 user_url: Some("/commenter/".to_string()),
                 reply_count: Some(2),
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_public_pin_comment_replies_response() {
+        let response = serde_json::json!({
+            "resource_response": {
+                "status": "success",
+                "data": [
+                    {
+                        "id": "reply-1",
+                        "text": "Nested reply",
+                        "created_at": "Tue, 16 Jun 2026 12:00:00 +0000",
+                        "user": {"id": "user-2"}
+                    }
+                ]
+            }
+        });
+
+        let comments =
+            parse_public_pin_comment_replies_response(&response, 10, "comment-1").unwrap();
+
+        assert_eq!(
+            comments,
+            vec![PublicPinComment {
+                id: Some("reply-1".to_string()),
+                text: "Nested reply".to_string(),
+                created_at: Some("Tue, 16 Jun 2026 12:00:00 +0000".to_string()),
+                parent_comment_id: Some("comment-1".to_string()),
+                user_id: Some("user-2".to_string()),
+                user_username: None,
+                user_full_name: None,
+                user_url: None,
+                reply_count: None,
             }]
         );
     }
