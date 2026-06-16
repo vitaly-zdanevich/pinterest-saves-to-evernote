@@ -1257,13 +1257,42 @@ fn normalize_pinterest_datetime(value: String) -> String {
 }
 
 fn parse_aggregated_pin_data_from_html(html: &str) -> Option<AggregatedPinData> {
+    // A public pin page embeds several `aggregatedPinData` blobs. The first one
+    // is often a stub holding only aggregated stats and a relay id, with no
+    // `entityId`. Scan every blob and prefer the one that carries both the entity
+    // id and the comment count (the pin this page is about); fall back to the
+    // first blob that at least exposes an entity id.
     let marker = "\"aggregatedPinData\":";
-    let start = html.find(marker)? + marker.len();
-    let object = json_object_prefix(&html[start..])?;
-    let value = serde_json::from_str::<Value>(object).ok()?;
-    Some(AggregatedPinData {
-        entity_id: string_field(&value, "entityId")?,
-        comment_count: value.get("commentCount").and_then(Value::as_u64),
+    let mut fallback_entity_id = None;
+    let mut rest = html;
+
+    while let Some(idx) = rest.find(marker) {
+        let after = &rest[idx + marker.len()..];
+        rest = after;
+
+        let Some(object) = json_object_prefix(after) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(object) else {
+            continue;
+        };
+        let Some(entity_id) = string_field(&value, "entityId") else {
+            continue;
+        };
+
+        let comment_count = value.get("commentCount").and_then(Value::as_u64);
+        if comment_count.is_some() {
+            return Some(AggregatedPinData {
+                entity_id,
+                comment_count,
+            });
+        }
+        fallback_entity_id.get_or_insert(entity_id);
+    }
+
+    fallback_entity_id.map(|entity_id| AggregatedPinData {
+        entity_id,
+        comment_count: None,
     })
 }
 
@@ -2044,6 +2073,24 @@ mod tests {
 
         assert_eq!(data.entity_id, "5302154233464808675");
         assert_eq!(data.comment_count, Some(5));
+    }
+
+    #[test]
+    fn skips_aggregated_pin_data_stub_without_entity_id() {
+        // Live pin pages emit a leading stub blob (stats + relay id only) before
+        // the real one. The parser must skip it and use the blob that carries the
+        // entity id and comment count.
+        let html = concat!(
+            r#"<script>x({"aggregatedPinData":{"aggregatedStats":{"saves":10892},"#,
+            r#""id":"QWdncmVnYXRlZFBpbkRhdGE6MzU0MjA4NDA5MzkxMDY2MzU1Mg=="}});</script>"#,
+            r#"<script>y({"aggregatedPinData":{"entityId":"3542084093910663552","#,
+            r#""id":"relay-id","commentCount":140}});</script>"#,
+        );
+
+        let data = parse_aggregated_pin_data_from_html(html).unwrap();
+
+        assert_eq!(data.entity_id, "3542084093910663552");
+        assert_eq!(data.comment_count, Some(140));
     }
 
     #[test]
