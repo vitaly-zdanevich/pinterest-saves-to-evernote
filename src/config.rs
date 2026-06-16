@@ -95,10 +95,7 @@ impl Settings {
             return Err(anyhow!("MAX_IMAGE_BYTES must be greater than 0"));
         }
 
-        let max_pin_comments = parse_usize_env("MAX_PIN_COMMENTS", 25)?;
-        if max_pin_comments == 0 {
-            return Err(anyhow!("MAX_PIN_COMMENTS must be greater than 0"));
-        }
+        let max_pin_comments = max_pin_comments_limit(parse_usize_env("MAX_PIN_COMMENTS", 0)?);
 
         Ok(Self {
             pinterest_access_token,
@@ -199,6 +196,13 @@ fn parse_u64_env(name: &str, default: u64) -> Result<u64> {
             .parse::<u64>()
             .map_err(|_| anyhow!("{name} must be an unsigned integer")),
         None => Ok(default),
+    }
+}
+
+fn max_pin_comments_limit(value: usize) -> usize {
+    match value {
+        0 => usize::MAX,
+        value => value,
     }
 }
 
@@ -307,6 +311,12 @@ mod tests {
                 "reference".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn zero_pin_comment_limit_means_unlimited() {
+        assert_eq!(max_pin_comments_limit(0), usize::MAX);
+        assert_eq!(max_pin_comments_limit(25), 25);
     }
 
     #[test]

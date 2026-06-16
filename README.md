@@ -92,7 +92,7 @@ Optional Pinterest behavior:
 - `ATTACH_IMAGES`: download and attach the image resource to Evernote. Defaults to `true`.
 - `MAX_IMAGE_BYTES`: maximum image download size. Defaults to `26214400`.
 - `SCRAPE_PIN_COMMENTS`: scrape public pin comments into each new note. Defaults to `true`.
-- `MAX_PIN_COMMENTS`: maximum text comments to store per note. Defaults to `25`.
+- `MAX_PIN_COMMENTS`: maximum text comments and replies to store per note. Defaults to unlimited; set a positive number to cap note size. `0` also means unlimited.
 - `DRY_RUN`: fetch and log without writing Evernote or state. Defaults to `false`.
 
 The scheduled GitHub workflow uses `STATE_PATH=state/state.json` because the Actions cache is configured for the `state/` directory.
