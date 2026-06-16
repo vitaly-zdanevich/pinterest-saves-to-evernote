@@ -77,7 +77,7 @@ Leave `EVERNOTE_NOTEBOOK_GUID` unset when using `EVERNOTE_NOTEBOOK_NAME`.
 - `EVERNOTE_TAGS`: comma-separated tags. Defaults to `pinterest`.
 - `EVERNOTE_NOTEBOOK_NAME`: target Evernote notebook name. If omitted, Evernote uses the default notebook. Do not set it together with `EVERNOTE_NOTEBOOK_GUID`.
 
-Pin title hashtags are also added as Evernote tags without the leading `#`, and removed from the Evernote note title and rendered `Title` row.
+Pin title and description hashtags are also added as Evernote tags without the leading `#`. They are removed from the Evernote note title and rendered description; if a description contains only hashtags, the `Description` row is omitted.
 
 Optional Pinterest behavior:
 

@@ -138,7 +138,7 @@ async fn export_pin(
     }
 
     let title = note::title(&saved);
-    let tags = merged_note_tags(&settings.evernote_tags, note::title_hashtags(&saved));
+    let tags = merged_note_tags(&settings.evernote_tags, note::pin_hashtags(&saved));
     let image_url = saved.pin.best_image_url().map(ToOwned::to_owned);
     let image =
         if let (Some(downloader), Some(image_url)) = (image_downloader, image_url.as_deref()) {
@@ -241,7 +241,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn merges_configured_and_title_tags_without_duplicates() {
+    fn merges_configured_and_pin_tags_without_duplicates() {
         let tags = merged_note_tags(
             &["pinterest".to_string(), "nostalgia".to_string()],
             vec![

@@ -17,19 +17,26 @@ pub fn title(saved: &SavedPin) -> String {
     truncate_title(&title)
 }
 
-pub fn title_hashtags(saved: &SavedPin) -> Vec<String> {
-    saved
-        .pin
-        .title
-        .as_deref()
-        .map(hashtags_from_text)
-        .unwrap_or_default()
+pub fn pin_hashtags(saved: &SavedPin) -> Vec<String> {
+    let mut tags = Vec::new();
+    for raw in [saved.pin.title.as_deref(), saved.pin.description.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        append_unique_hashtags(&mut tags, raw);
+    }
+    tags
 }
 
 pub fn enml(saved: &SavedPin, image: Option<&DownloadedImage>) -> String {
     // Evernote stores note bodies as ENML, an XHTML subset. Every value that comes
     // from Pinterest must be escaped before being inserted into the document.
-    let description = multiline_field("Description", saved.pin.description.as_deref());
+    let description_without_hashtags = saved
+        .pin
+        .description
+        .as_deref()
+        .and_then(clean_description_without_hashtags);
+    let description = multiline_field("Description", description_without_hashtags.as_deref());
     let alt_text = multiline_field("Alt text", saved.pin.alt_text.as_deref());
     let section = saved
         .section
@@ -290,6 +297,21 @@ fn link_text(url: &str, text: &str) -> String {
 }
 
 fn clean_title_without_hashtags(raw: &str) -> Option<String> {
+    clean_title_separators(&text_without_hashtags(raw))
+}
+
+fn clean_description_without_hashtags(raw: &str) -> Option<String> {
+    let cleaned = text_without_hashtags(raw);
+    let cleaned = cleaned.trim();
+
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned.to_string())
+    }
+}
+
+fn text_without_hashtags(raw: &str) -> String {
     let ranges = hashtag_ranges(raw);
     let mut cleaned = String::with_capacity(raw.len());
     let mut offset = 0;
@@ -299,18 +321,15 @@ fn clean_title_without_hashtags(raw: &str) -> Option<String> {
         offset = range.end;
     }
     cleaned.push_str(&raw[offset..]);
-
-    clean_title_separators(&cleaned)
+    cleaned
 }
 
-fn hashtags_from_text(raw: &str) -> Vec<String> {
-    let mut tags = Vec::new();
+fn append_unique_hashtags(tags: &mut Vec<String>, raw: &str) {
     for (_, tag) in hashtag_ranges(raw) {
         if !tags.iter().any(|existing| existing == &tag) {
             tags.push(tag);
         }
     }
-    tags
 }
 
 fn hashtag_ranges(raw: &str) -> Vec<(std::ops::Range<usize>, String)> {
@@ -414,6 +433,12 @@ mod tests {
         }
     }
 
+    fn saved_pin_with_title_and_description(title: &str, description: &str) -> SavedPin {
+        let mut saved = saved_pin_with_title(title);
+        saved.pin.description = Some(description.to_string());
+        saved
+    }
+
     #[test]
     fn extracts_hashtags_from_title_and_drops_them_from_title() {
         let saved = saved_pin_with_title(
@@ -425,7 +450,7 @@ mod tests {
             "Y2k older brother core wallpaper, Older brother corr, Nostalgic"
         );
         assert_eq!(
-            title_hashtags(&saved),
+            pin_hashtags(&saved),
             vec![
                 "olderbrothercore".to_string(),
                 "olderbrother".to_string(),
@@ -438,6 +463,37 @@ mod tests {
         assert!(!enml.contains("#olderbrothercore"));
         assert!(!enml.contains("#olderbrother"));
         assert!(!enml.contains("#nostalgia"));
+    }
+
+    #[test]
+    fn extracts_description_hashtags_and_omits_description_when_only_tags() {
+        let saved = saved_pin_with_title_and_description("Bubblegum", "#пушин #щп #жвачки");
+
+        assert_eq!(
+            pin_hashtags(&saved),
+            vec!["пушин".to_string(), "щп".to_string(), "жвачки".to_string(),]
+        );
+
+        let enml = enml(&saved, None);
+        assert!(!enml.contains("<b>Description:</b>"));
+        assert!(!enml.contains("#пушин"));
+        assert!(!enml.contains("#щп"));
+        assert!(!enml.contains("#жвачки"));
+    }
+
+    #[test]
+    fn removes_description_hashtags_but_keeps_description_text() {
+        let saved = saved_pin_with_title_and_description("Decor", "Cozy room #уют #room");
+
+        assert_eq!(
+            pin_hashtags(&saved),
+            vec!["уют".to_string(), "room".to_string()]
+        );
+
+        let enml = enml(&saved, None);
+        assert!(enml.contains("<b>Description:</b> Cozy room"));
+        assert!(!enml.contains("#уют"));
+        assert!(!enml.contains("#room"));
     }
 
     #[test]
