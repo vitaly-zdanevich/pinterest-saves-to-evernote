@@ -16,6 +16,13 @@ use crate::config::{PinterestFetchMode, Settings};
 const CLIENT_NAME: &str = "pinterest-saves-to-evernote/0.1";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+// Pinterest's comment endpoints return only a numeric `user.id` unless the
+// request explicitly asks for the expanded user entity. The field set must be
+// nested under `options.data.fields`; placing it on `options.fields` or as a
+// top-level query parameter is silently ignored. The parent `aggregatedcomment`
+// entity has to list `user()` for the `user.{...}` spec to take effect.
+const PUBLIC_COMMENT_FIELDS: &str = "aggregatedcomment.{id,text,type,created_at,comment_count,highlighted_by_pin_owner,parent_comment_id,user()},user.{id,username,full_name,image_small_url,image_medium_url,image_large_url}";
+
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     access_token: String,
@@ -547,13 +554,13 @@ pub async fn scrape_public_pin_comments(
         return Ok(summary);
     }
 
-    // The public response may include only numeric user ids for commenters.
-    // Rendering code intentionally ignores those ids unless a username or URL is
-    // also present, because the public scraper has no reliable id-to-profile map.
+    // Without an explicit field set the response carries only numeric user ids
+    // for commenters. PUBLIC_COMMENT_FIELDS expands each comment's user entity so
+    // usernames and display names come back alongside the id.
     let data = serde_json::json!({
         "options": {
             "url": format!("/v3/aggregated_pin_data/{}/comments/", aggregated.entity_id),
-            "data": {}
+            "data": { "fields": PUBLIC_COMMENT_FIELDS }
         },
         "context": {}
     })
@@ -686,7 +693,7 @@ async fn fetch_public_pin_comment_replies(
     let data = serde_json::json!({
         "options": {
             "url": format!("/v3/aggregated_comments/{parent_comment_id}/replies/"),
-            "data": {}
+            "data": { "fields": PUBLIC_COMMENT_FIELDS }
         },
         "context": {}
     })
