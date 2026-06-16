@@ -302,19 +302,26 @@ pub async fn public_profile_saved_pins(settings: &Settings) -> Result<Vec<SavedP
         url = url.as_str(),
         "fetching public Pinterest profile without API"
     );
-    let response = client
-        .get(url.clone())
-        .header(
-            reqwest::header::ACCEPT,
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        )
+    let configured_cookie_header =
+        configured_pinterest_cookie_header(settings.pinterest_cookie.as_deref())?;
+    let mut page_request = client.get(url.clone()).header(
+        reqwest::header::ACCEPT,
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    );
+    if let Some(cookie_header) = &configured_cookie_header {
+        page_request = page_request.header(COOKIE, cookie_header.clone());
+    }
+    let response = page_request
         .send()
         .await
         .with_context(|| format!("failed to fetch public Pinterest profile {url}"))?;
 
     let status = response.status();
     let final_url = response.url().clone();
-    let cookie_header = response_cookie_header(response.headers());
+    let cookie_header = merge_cookie_headers(
+        configured_cookie_header.as_ref(),
+        response_cookie_header(response.headers()).as_ref(),
+    );
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         return Err(anyhow!(
@@ -483,6 +490,7 @@ async fn fetch_public_profile_pin_page(
 pub async fn scrape_public_pin_comments(
     pin_id: &str,
     max_comments: usize,
+    pinterest_cookie: Option<&str>,
 ) -> Result<PublicPinComments> {
     let pin_url = format!("https://www.pinterest.com/pin/{pin_id}/");
     let comments_url = format!("https://www.pinterest.com/pin/{pin_id}/comments/");
@@ -494,21 +502,24 @@ pub async fn scrape_public_pin_comments(
         .build()
         .context("failed to build Pinterest public comments HTTP client")?;
 
-    let page_response = client
-        .get(&comments_url)
-        .header(
-            ACCEPT,
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        )
-        .send()
-        .await
-        .with_context(|| {
-            format!("failed to fetch public Pinterest comments page {comments_url}")
-        })?;
+    let configured_cookie_header = configured_pinterest_cookie_header(pinterest_cookie)?;
+    let mut page_request = client.get(&comments_url).header(
+        ACCEPT,
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    );
+    if let Some(cookie_header) = &configured_cookie_header {
+        page_request = page_request.header(COOKIE, cookie_header.clone());
+    }
+    let page_response = page_request.send().await.with_context(|| {
+        format!("failed to fetch public Pinterest comments page {comments_url}")
+    })?;
 
     let status = page_response.status();
     let final_url = page_response.url().clone();
-    let cookie_header = response_cookie_header(page_response.headers());
+    let cookie_header = merge_cookie_headers(
+        configured_cookie_header.as_ref(),
+        response_cookie_header(page_response.headers()).as_ref(),
+    );
     if !status.is_success() {
         let body = page_response.text().await.unwrap_or_default();
         return Err(anyhow!(
@@ -1364,6 +1375,14 @@ fn pinterest_error_message(error: &Value) -> String {
         .unwrap_or_else(|| error.to_string())
 }
 
+fn configured_pinterest_cookie_header(raw: Option<&str>) -> Result<Option<HeaderValue>> {
+    raw.map(|cookie| {
+        HeaderValue::from_str(cookie.trim())
+            .context("PINTEREST_COOKIE must be a valid HTTP Cookie header")
+    })
+    .transpose()
+}
+
 fn response_cookie_header(headers: &HeaderMap) -> Option<HeaderValue> {
     // Convert Set-Cookie headers from the initial HTML response into one Cookie
     // header for subsequent resource calls. Attributes such as Path and Expires
@@ -1382,6 +1401,49 @@ fn response_cookie_header(headers: &HeaderMap) -> Option<HeaderValue> {
         None
     } else {
         HeaderValue::from_str(&cookie).ok()
+    }
+}
+
+fn merge_cookie_headers(
+    configured_cookie_header: Option<&HeaderValue>,
+    response_cookie_header: Option<&HeaderValue>,
+) -> Option<HeaderValue> {
+    let mut cookies = BTreeMap::new();
+    append_cookie_header_parts(&mut cookies, configured_cookie_header);
+    append_cookie_header_parts(&mut cookies, response_cookie_header);
+
+    if cookies.is_empty() {
+        return None;
+    }
+
+    let cookie = cookies
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    HeaderValue::from_str(&cookie).ok()
+}
+
+fn append_cookie_header_parts(
+    cookies: &mut BTreeMap<String, String>,
+    cookie_header: Option<&HeaderValue>,
+) {
+    let Some(cookie_header) = cookie_header else {
+        return;
+    };
+    let Ok(cookie_header) = cookie_header.to_str() else {
+        return;
+    };
+
+    for part in cookie_header.split(';') {
+        let Some((name, value)) = part.trim().split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        cookies.insert(name.to_string(), value.trim().to_string());
     }
 }
 
@@ -1875,6 +1937,30 @@ mod tests {
         let cookie = response_cookie_header(&headers).expect("cookie header");
 
         assert_eq!(cookie.to_str().unwrap(), "csrftoken=abc; session=def");
+    }
+
+    #[test]
+    fn validates_configured_pinterest_cookie_header() {
+        let cookie = configured_pinterest_cookie_header(Some("session=abc; csrftoken=def"))
+            .unwrap()
+            .expect("configured cookie");
+
+        assert_eq!(cookie.to_str().unwrap(), "session=abc; csrftoken=def");
+        assert!(configured_pinterest_cookie_header(Some("bad\ncookie")).is_err());
+    }
+
+    #[test]
+    fn merges_configured_and_response_cookie_headers() {
+        let configured = HeaderValue::from_static("_pinterest_sess=logged-in; csrftoken=old-token");
+        let response = HeaderValue::from_static("csrftoken=new-token; unauth_id=guest");
+
+        let cookie =
+            merge_cookie_headers(Some(&configured), Some(&response)).expect("merged cookie header");
+
+        assert_eq!(
+            cookie.to_str().unwrap(),
+            "_pinterest_sess=logged-in; csrftoken=new-token; unauth_id=guest"
+        );
     }
 
     #[test]

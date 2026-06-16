@@ -15,6 +15,7 @@ pub struct Settings {
     pub pinterest_client_id: Option<String>,
     pub pinterest_client_secret: Option<String>,
     pub pinterest_refresh_token: Option<String>,
+    pub pinterest_cookie: Option<String>,
     pub public_profile_to_parse_without_api: Option<String>,
     pub public_profile_max_pages: usize,
     pub pinterest_token_scope: String,
@@ -45,6 +46,7 @@ impl Settings {
         let pinterest_client_id = optional_env("PINTEREST_CLIENT_ID");
         let pinterest_client_secret = optional_env("PINTEREST_CLIENT_SECRET");
         let pinterest_refresh_token = optional_env("PINTEREST_REFRESH_TOKEN");
+        let pinterest_cookie = optional_env("PINTEREST_COOKIE");
         let public_profile_to_parse_without_api =
             optional_env("PUBLIC_PROFILE_TO_PARSE_WITHOUT_API");
 
@@ -102,6 +104,7 @@ impl Settings {
             pinterest_client_id,
             pinterest_client_secret,
             pinterest_refresh_token,
+            pinterest_cookie,
             public_profile_to_parse_without_api,
             public_profile_max_pages,
             pinterest_token_scope: env_or("PINTEREST_TOKEN_SCOPE", "boards:read,pins:read"),
@@ -233,6 +236,7 @@ mod tests {
             pinterest_client_id: client_id.map(ToOwned::to_owned),
             pinterest_client_secret: client_secret.map(ToOwned::to_owned),
             pinterest_refresh_token: refresh_token.map(ToOwned::to_owned),
+            pinterest_cookie: None,
             public_profile_to_parse_without_api: None,
             public_profile_max_pages: 3,
             pinterest_token_scope: "boards:read,pins:read".to_string(),

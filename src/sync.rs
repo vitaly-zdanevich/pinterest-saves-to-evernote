@@ -121,7 +121,13 @@ async fn export_pin(
     if settings.scrape_pin_comments {
         // Comment scraping is best-effort because it depends on Pinterest's public
         // web endpoints. A comments failure must not block exporting the pin itself.
-        match scrape_public_pin_comments(&saved.pin.id, settings.max_pin_comments).await {
+        match scrape_public_pin_comments(
+            &saved.pin.id,
+            settings.max_pin_comments,
+            settings.pinterest_cookie.as_deref(),
+        )
+        .await
+        {
             Ok(comments) => comments.attach_to_extra(&mut saved.pin.extra),
             Err(error) => warn!(
                 pin_id = saved.pin.id,

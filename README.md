@@ -87,6 +87,7 @@ Optional Pinterest behavior:
 - `PINTEREST_FETCH_MODE`: `boards` or `account`. Defaults to `boards`.
 - `PINTEREST_INCLUDE_SECTIONS`: also list board-section pins. Defaults to `true`.
 - `PINTEREST_API_BASE_URL`: defaults to `https://api.pinterest.com/v5`.
+- `PINTEREST_COOKIE`: optional raw Pinterest `Cookie` header for logged-in public-page scraping. Store it as a GitHub Actions secret, not a variable. This is sensitive browser-session data and should be rotated if exposed.
 - `BACKFILL_EXISTING`: import existing pins on first run. Defaults to `false`.
 - `MAX_PINS_PER_RUN`: cap Evernote notes per run. Defaults to `25`.
 - `ATTACH_IMAGES`: download and attach the image resource to Evernote. Defaults to `true`.
