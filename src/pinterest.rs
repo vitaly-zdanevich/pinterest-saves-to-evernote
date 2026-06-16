@@ -1390,6 +1390,11 @@ fn parse_public_pin_comment(
     parent_comment_id: Option<&str>,
 ) -> Option<PublicPinComment> {
     let text = string_field(value, "text")?;
+    let user_username = nested_string_field(value, &["user", "username"]);
+    // The comments API returns a username but no profile URL. Pinterest profiles
+    // live at /<username>/, so derive the link when the API omits an explicit one.
+    let user_url = nested_string_field(value, &["user", "url"])
+        .or_else(|| user_username.as_deref().map(|name| format!("/{name}/")));
     Some(PublicPinComment {
         id: string_field(value, "id"),
         text,
@@ -1398,9 +1403,9 @@ fn parse_public_pin_comment(
             .map(str::to_string)
             .or_else(|| string_field(value, "parent_comment_id")),
         user_id: nested_string_field(value, &["user", "id"]),
-        user_username: nested_string_field(value, &["user", "username"]),
+        user_username,
         user_full_name: nested_string_field(value, &["user", "full_name"]),
-        user_url: nested_string_field(value, &["user", "url"]),
+        user_url,
         reply_count: value.get("comment_count").and_then(Value::as_u64),
     })
 }
@@ -2098,6 +2103,20 @@ mod tests {
 
         assert_eq!(data.entity_id, "3542084093910663552");
         assert_eq!(data.comment_count, Some(140));
+    }
+
+    #[test]
+    fn derives_comment_user_url_from_username_when_absent() {
+        let comment = serde_json::json!({
+            "id": "c1",
+            "text": "hi",
+            "user": {"id": "u1", "username": "krasnoruchik", "full_name": "Name"}
+        });
+
+        let parsed = parse_public_pin_comment(&comment, None).unwrap();
+
+        assert_eq!(parsed.user_username.as_deref(), Some("krasnoruchik"));
+        assert_eq!(parsed.user_url.as_deref(), Some("/krasnoruchik/"));
     }
 
     #[test]
