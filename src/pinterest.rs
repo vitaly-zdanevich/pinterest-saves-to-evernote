@@ -540,9 +540,11 @@ pub async fn scrape_public_pin_comments(
     // The comments resource needs an aggregated pin entity id, which is not the
     // same as the visible pin id. Pinterest embeds it in the public comments page.
     let aggregated = parse_aggregated_pin_data_from_html(&html).ok_or_else(|| {
-        let marker_found = html.contains("\"aggregatedPinData\":");
+        let marker_found = html.contains("\"aggregatedPinData\"");
+        let entity_id_found = html.contains("\"entityId\"");
+        let comment_count_found = html.contains("\"commentCount\"");
         anyhow!(
-            "public Pinterest comments entity-id stage failed for pin {pin_id} at {final_url}: aggregatedPinData marker found={marker_found}, but entityId/comment metadata could not be parsed"
+            "public Pinterest comments entity-id stage failed for pin {pin_id} at {final_url}: aggregatedPinData marker found={marker_found}, entityId marker found={entity_id_found}, commentCount marker found={comment_count_found}, but entityId/comment metadata could not be parsed"
         )
     })?;
     let mut summary = PublicPinComments {
@@ -1263,38 +1265,42 @@ fn normalize_pinterest_datetime(value: String) -> String {
         .unwrap_or(value)
 }
 
+/// Extracts the aggregated pin entity id Pinterest needs for comment-resource
+/// requests from a public pin page.
+///
+/// Public pin pages can embed several `aggregatedPinData` blobs. The first one
+/// is often a stub holding only aggregated stats and a relay id, with no
+/// `entityId`. This scans every blob, prefers the one that carries both entity id
+/// and comment count, and falls back to the first blob that exposes an entity id.
 fn parse_aggregated_pin_data_from_html(html: &str) -> Option<AggregatedPinData> {
-    // A public pin page embeds several `aggregatedPinData` blobs. The first one
-    // is often a stub holding only aggregated stats and a relay id, with no
-    // `entityId`. Scan every blob and prefer the one that carries both the entity
-    // id and the comment count (the pin this page is about); fall back to the
-    // first blob that at least exposes an entity id.
-    let marker = "\"aggregatedPinData\":";
+    let marker = "\"aggregatedPinData\"";
     let mut fallback_entity_id = None;
     let mut rest = html;
 
     while let Some(idx) = rest.find(marker) {
-        let after = &rest[idx + marker.len()..];
-        rest = after;
+        let after_marker = &rest[idx..];
+        let Some(value_start) = json_key_value_start(after_marker, "aggregatedPinData") else {
+            rest = &after_marker[marker.len()..];
+            continue;
+        };
+        let after = &after_marker[value_start..];
+        let next_marker = after
+            .get(1..)
+            .and_then(|tail| tail.find(marker).map(|next| next + 1))
+            .unwrap_or(after.len());
+        let segment = &after[..next_marker];
+        rest = &after[next_marker..];
 
-        let Some(object) = json_object_prefix(after) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<Value>(object) else {
-            continue;
-        };
-        let Some(entity_id) = string_field(&value, "entityId") else {
+        let Some(data) = parse_aggregated_pin_data_json(after)
+            .or_else(|| parse_aggregated_pin_data_loose(segment))
+        else {
             continue;
         };
 
-        let comment_count = value.get("commentCount").and_then(Value::as_u64);
-        if comment_count.is_some() {
-            return Some(AggregatedPinData {
-                entity_id,
-                comment_count,
-            });
+        if data.comment_count.is_some() {
+            return Some(data);
         }
-        fallback_entity_id.get_or_insert(entity_id);
+        fallback_entity_id.get_or_insert(data.entity_id);
     }
 
     fallback_entity_id.map(|entity_id| AggregatedPinData {
@@ -1303,9 +1309,80 @@ fn parse_aggregated_pin_data_from_html(html: &str) -> Option<AggregatedPinData> 
     })
 }
 
+/// Parses a strict JSON `aggregatedPinData` object.
+fn parse_aggregated_pin_data_json(raw: &str) -> Option<AggregatedPinData> {
+    let object = json_object_prefix(raw)?;
+    let value = serde_json::from_str::<Value>(object).ok()?;
+    let entity_id = string_field(&value, "entityId")?;
+    let comment_count = value.get("commentCount").and_then(Value::as_u64);
+    Some(AggregatedPinData {
+        entity_id,
+        comment_count,
+    })
+}
+
+/// Recovers `aggregatedPinData` fields from a bounded page-data fragment when
+/// Pinterest emits data that is not parseable as one balanced JSON object.
+fn parse_aggregated_pin_data_loose(raw: &str) -> Option<AggregatedPinData> {
+    let entity_id = loose_json_string_field(raw, "entityId")?;
+    let comment_count = loose_json_u64_field(raw, "commentCount");
+    Some(AggregatedPinData {
+        entity_id,
+        comment_count,
+    })
+}
+
+/// Returns the byte offset where a JSON object's key value starts.
+fn json_key_value_start(raw: &str, key: &str) -> Option<usize> {
+    let needle = format!("\"{key}\"");
+    let key_start = raw.find(&needle)?;
+    let after_key = key_start + needle.len();
+    let after_key_trimmed = raw[after_key..].trim_start();
+    let whitespace_before_colon = raw[after_key..].len() - after_key_trimmed.len();
+    let colon_start = after_key + whitespace_before_colon;
+    let after_colon = raw[colon_start..].strip_prefix(':')?;
+    let after_colon_trimmed = after_colon.trim_start();
+    Some(raw.len() - after_colon_trimmed.len())
+}
+
+/// Reads a quoted string field from a JSON-like fragment without parsing the
+/// whole fragment as JSON.
+fn loose_json_string_field(raw: &str, key: &str) -> Option<String> {
+    let value = raw[json_key_value_start(raw, key)?..].trim_start();
+    if !value.starts_with('"') {
+        return None;
+    }
+
+    let mut escaped = false;
+    for (offset, character) in value.char_indices().skip(1) {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            return serde_json::from_str::<String>(&value[..=offset]).ok();
+        }
+    }
+
+    None
+}
+
+/// Reads an unsigned integer field from a JSON-like fragment without parsing the
+/// whole fragment as JSON.
+fn loose_json_u64_field(raw: &str, key: &str) -> Option<u64> {
+    let value = raw[json_key_value_start(raw, key)?..].trim_start();
+    let end = value
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(value.len());
+    if end == 0 {
+        return None;
+    }
+    value[..end].parse().ok()
+}
+
+/// Returns the first complete JSON object from a larger JavaScript payload while
+/// respecting quoted braces and escapes.
 fn json_object_prefix(raw: &str) -> Option<&str> {
-    // Pinterest embeds JSON inside larger JavaScript payloads. This scanner returns
-    // the first complete object while respecting quoted braces and escapes.
     let raw = raw.trim_start();
     if !raw.starts_with('{') {
         return None;
@@ -2103,6 +2180,34 @@ mod tests {
 
         assert_eq!(data.entity_id, "3542084093910663552");
         assert_eq!(data.comment_count, Some(140));
+    }
+
+    #[test]
+    fn parses_aggregated_pin_data_with_whitespace_after_key() {
+        let html = r#"<script>window.__P={"aggregatedPinData" : {"entityId":"5125240752053465170","commentCount":12}};</script>"#;
+
+        let data = parse_aggregated_pin_data_from_html(html).unwrap();
+
+        assert_eq!(data.entity_id, "5125240752053465170");
+        assert_eq!(data.comment_count, Some(12));
+    }
+
+    #[test]
+    fn loosely_parses_unbalanced_aggregated_pin_data_segment() {
+        // CI saw Pinterest HTML containing the `aggregatedPinData` marker but the
+        // strict JSON-object scanner could not parse entity/comment metadata. The
+        // fallback still recovers the fields from the current segment.
+        let html = concat!(
+            r#"<script>{"aggregatedPinData":{"aggregatedStats":{"saves":10892},"#,
+            r#""id":"relay-id"}}</script>"#,
+            r#"<script>{"aggregatedPinData":{"entityId":"5125240752053465170","#,
+            r#""commentCount":12,"aggregatedStats":{"saves":3712}</script>"#,
+        );
+
+        let data = parse_aggregated_pin_data_from_html(html).unwrap();
+
+        assert_eq!(data.entity_id, "5125240752053465170");
+        assert_eq!(data.comment_count, Some(12));
     }
 
     #[test]
