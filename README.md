@@ -119,3 +119,7 @@ Use dry-run mode first:
 ```bash
 DRY_RUN=true cargo run -- sync
 ```
+
+## See also
+
+- [evernote-pwa](https://github.com/vitaly-zdanevich/evernote-pwa) - installable web app to view and edit the latest Evernote notes, offline-capable.
