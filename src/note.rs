@@ -1,3 +1,4 @@
+use chrono::{DateTime, Datelike};
 use html_escape::{encode_double_quoted_attribute, encode_safe};
 use serde_json::{Map, Value};
 
@@ -187,17 +188,19 @@ fn comment_row(comment: &Map<String, Value>) -> Option<String> {
         metadata.push(author);
     }
     if let Some(created_at) = extra_string(comment, "created_at") {
-        metadata.push(encode_safe(created_at).to_string());
+        metadata.push(encode_safe(&comment_date(created_at)).to_string());
     }
-    let label_text = if extra_string(comment, "parent_comment_id").is_some() {
-        "Reply"
+    let is_reply = extra_string(comment, "parent_comment_id").is_some();
+    let label_text = if is_reply { "Reply" } else { "Comment" };
+    let label_prefix = if is_reply {
+        "&#160;&#160;&#160;&#160;"
     } else {
-        "Comment"
+        ""
     };
     let label = if metadata.is_empty() {
-        format!("<b>{label_text}</b>")
+        format!("{label_prefix}<b>{label_text}</b>")
     } else {
-        format!("<b>{label_text}</b> ({})", metadata.join(", "))
+        format!("{label_prefix}<b>{label_text}</b> {}", metadata.join(" "))
     };
     let body = text
         .lines()
@@ -206,6 +209,21 @@ fn comment_row(comment: &Map<String, Value>) -> Option<String> {
         .join("<br/>");
 
     Some(format!("<div>{label}: {body}</div>"))
+}
+
+/// Formats Pinterest comment timestamps as a compact note date.
+fn comment_date(raw: &str) -> String {
+    DateTime::parse_from_rfc3339(raw)
+        .or_else(|_| DateTime::parse_from_rfc2822(raw))
+        .map(|datetime| {
+            format!(
+                "{}-{}-{}",
+                datetime.year(),
+                datetime.month(),
+                datetime.day()
+            )
+        })
+        .unwrap_or_else(|_| raw.to_string())
 }
 
 fn comment_author_markup(comment: &Map<String, Value>) -> Option<String> {
@@ -539,7 +557,7 @@ mod tests {
         let row = comment_row(&comment).expect("comment row");
 
         assert!(row.contains("No public username"));
-        assert!(row.contains("Thu, 21 Nov 2024 18:26:37 +0000"));
+        assert!(row.contains("2024-11-21"));
         assert!(!row.contains("123456789"));
         assert!(!row.contains("Pinterest user"));
     }
@@ -585,22 +603,64 @@ mod tests {
     }
 
     #[test]
-    fn renders_comment_replies_without_parent_id() {
+    fn renders_comment_rows_with_compact_metadata() {
         let mut comment = Map::new();
         comment.insert(
             "text".to_string(),
-            Value::String("Nested reply".to_string()),
+            Value::String("Top-level comment".to_string()),
+        );
+        comment.insert(
+            "user_username".to_string(),
+            Value::String("commenter".to_string()),
+        );
+        comment.insert(
+            "created_at".to_string(),
+            Value::String("Mon, 15 Jun 2026 10:00:00 +0000".to_string()),
+        );
+
+        let row = comment_row(&comment).expect("comment row");
+
+        assert!(row.contains("<b>Comment</b>"));
+        assert!(row.contains("@commenter"));
+        assert!(row.contains("2026-6-15"));
+        assert!(row.contains(": Top-level comment"));
+        assert!(!row.contains(","));
+        assert!(!row.contains("Mon, 15 Jun 2026"));
+    }
+
+    #[test]
+    fn renders_comment_replies_indented_without_parent_id() {
+        let mut comment = Map::new();
+        comment.insert(
+            "text".to_string(),
+            Value::String("no your life is a joke".to_string()),
         );
         comment.insert(
             "parent_comment_id".to_string(),
             Value::String("2916023393059841600".to_string()),
         );
+        comment.insert(
+            "user_username".to_string(),
+            Value::String("jenniferatakpu".to_string()),
+        );
+        comment.insert(
+            "created_at".to_string(),
+            Value::String("Sun, 31 May 2026 11:58:29 +0000".to_string()),
+        );
 
         let row = comment_row(&comment).expect("comment row");
 
-        assert!(row.contains("<b>Reply</b>"));
-        assert!(row.contains("Nested reply"));
+        assert!(row.contains(
+            "&#160;&#160;&#160;&#160;<b>Reply</b> <a href=\"https://www.pinterest.com/jenniferatakpu/\">@jenniferatakpu</a> 2026-5-31: no your life is a joke"
+        ));
         assert!(!row.contains("2916023393059841600"));
+        assert!(!row.contains("Sun, 31 May 2026"));
+        assert!(!row.contains(","));
+    }
+
+    #[test]
+    fn keeps_unparseable_comment_dates() {
+        assert_eq!(comment_date("not a date"), "not a date");
     }
 
     #[test]
