@@ -273,6 +273,10 @@ struct PublicProfileParseDiagnostics {
     user_pins_resource_objects: usize,
     user_pins_resource_data_arrays: usize,
     user_pins_resource_pins: usize,
+    initial_redux_state_scripts: usize,
+    initial_redux_state_parse_errors: usize,
+    initial_redux_state_pin_maps: usize,
+    initial_redux_state_pins: usize,
     json_ld_scripts: usize,
     json_ld_parse_errors: usize,
     json_ld_pins: usize,
@@ -349,6 +353,10 @@ pub async fn public_profile_saved_pins(settings: &Settings) -> Result<Vec<SavedP
         user_pins_resource_objects = page.diagnostics.user_pins_resource_objects,
         user_pins_resource_data_arrays = page.diagnostics.user_pins_resource_data_arrays,
         user_pins_resource_pins = page.diagnostics.user_pins_resource_pins,
+        initial_redux_state_scripts = page.diagnostics.initial_redux_state_scripts,
+        initial_redux_state_parse_errors = page.diagnostics.initial_redux_state_parse_errors,
+        initial_redux_state_pin_maps = page.diagnostics.initial_redux_state_pin_maps,
+        initial_redux_state_pins = page.diagnostics.initial_redux_state_pins,
         json_ld_scripts = page.diagnostics.json_ld_scripts,
         json_ld_parse_errors = page.diagnostics.json_ld_parse_errors,
         json_ld_pins = page.diagnostics.json_ld_pins,
@@ -1020,6 +1028,12 @@ fn parse_public_profile_html(html: &str) -> Result<PublicProfilePinsPage> {
         parse_user_pins_resource_from_html(html, &mut pins, &mut seen, &mut diagnostics);
 
     if pins.is_empty() {
+        // Pinterest can intermittently return a UserPinsResource shell without a
+        // `data` array while still embedding the normalized Redux pins map.
+        parse_initial_redux_state_pins_from_html(html, &mut pins, &mut seen, &mut diagnostics);
+    }
+
+    if pins.is_empty() {
         // JSON-LD has less metadata and usually fewer pins, but it is useful when
         // Pinterest changes the embedded application state while keeping SEO data.
         let before_json_ld = pins.len();
@@ -1079,6 +1093,9 @@ fn parse_user_pins_resource_from_html(
     };
     diagnostics.user_pins_resource_objects = resources.len();
     for resource in resources.values() {
+        if next_bookmark.is_none() {
+            next_bookmark = public_profile_next_bookmark(resource);
+        }
         let Some(data) = resource.get("data").and_then(Value::as_array) else {
             continue;
         };
@@ -1089,12 +1106,46 @@ fn parse_user_pins_resource_from_html(
             append_unique_pin(pins, seen, pin);
         }
         diagnostics.user_pins_resource_pins += parsed;
-        if parsed > 0 && next_bookmark.is_none() {
-            next_bookmark = public_profile_next_bookmark(resource);
-        }
     }
 
     next_bookmark
+}
+
+/// Parses Pinterest's normalized Redux pin map when UserPinsResource has no data.
+fn parse_initial_redux_state_pins_from_html(
+    html: &str,
+    pins: &mut Vec<SavedPin>,
+    seen: &mut BTreeSet<String>,
+    diagnostics: &mut PublicProfileParseDiagnostics,
+) {
+    for script in initial_redux_state_scripts(html) {
+        diagnostics.initial_redux_state_scripts += 1;
+        let value = match serde_json::from_str::<Value>(script.trim()) {
+            Ok(value) => value,
+            Err(error) => {
+                diagnostics.initial_redux_state_parse_errors += 1;
+                warn!(error = %error, "failed to parse Pinterest initial Redux state");
+                continue;
+            }
+        };
+        let Some(pin_map) = value
+            .get("initialReduxState")
+            .and_then(|state| state.get("pins"))
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        diagnostics.initial_redux_state_pin_maps += 1;
+        let mut parsed = 0_usize;
+        for pin in pin_map
+            .values()
+            .filter_map(parse_public_profile_resource_pin)
+        {
+            parsed += 1;
+            append_unique_pin(pins, seen, pin);
+        }
+        diagnostics.initial_redux_state_pins += parsed;
+    }
 }
 
 fn parse_public_profile_pin_page_response(value: &Value) -> Result<PublicProfilePinsPage> {
@@ -1132,12 +1183,16 @@ fn profile_parse_diagnostics(diagnostics: &PublicProfileParseDiagnostics) -> Str
         .as_deref()
         .unwrap_or("none");
     format!(
-        "UserPinsResource marker_found={}, json_found={}, parse_error={user_pins_error:?}, objects={}, data_arrays={}, pins={}; JSON-LD scripts={}, parse_errors={}, pins={}",
+        "UserPinsResource marker_found={}, json_found={}, parse_error={user_pins_error:?}, objects={}, data_arrays={}, pins={}; initialReduxState scripts={}, parse_errors={}, pin_maps={}, pins={}; JSON-LD scripts={}, parse_errors={}, pins={}",
         diagnostics.user_pins_resource_marker_found,
         diagnostics.user_pins_resource_json_found,
         diagnostics.user_pins_resource_objects,
         diagnostics.user_pins_resource_data_arrays,
         diagnostics.user_pins_resource_pins,
+        diagnostics.initial_redux_state_scripts,
+        diagnostics.initial_redux_state_parse_errors,
+        diagnostics.initial_redux_state_pin_maps,
+        diagnostics.initial_redux_state_pins,
         diagnostics.json_ld_scripts,
         diagnostics.json_ld_parse_errors,
         diagnostics.json_ld_pins,
@@ -1591,6 +1646,36 @@ fn json_ld_scripts(html: &str) -> Vec<&str> {
     scripts
 }
 
+/// Returns Pinterest application-state scripts that can contain initialReduxState.
+fn initial_redux_state_scripts(html: &str) -> Vec<&str> {
+    let mut scripts = Vec::new();
+    let mut rest = html;
+
+    while let Some(start) = rest.find("<script") {
+        rest = &rest[start..];
+        let Some(tag_end) = rest.find('>') else {
+            break;
+        };
+        let tag = &rest[..=tag_end];
+        let body_start = tag_end + 1;
+        let after_tag = &rest[body_start..];
+        let Some(script_end) = after_tag.find("</script>") else {
+            break;
+        };
+        let body = &after_tag[..script_end];
+
+        if tag.contains("application/json")
+            && (tag.contains("__PWS_INITIAL_PROPS__") || body.contains("\"initialReduxState\""))
+        {
+            scripts.push(body);
+        }
+
+        rest = &after_tag[script_end + "</script>".len()..];
+    }
+
+    scripts
+}
+
 fn collect_json_ld_pins(value: &Value, pins: &mut Vec<SavedPin>, seen: &mut BTreeSet<String>) {
     match value {
         Value::Array(items) => {
@@ -1879,6 +1964,40 @@ mod tests {
         assert_eq!(
             saved.pin.extra.get("public_author").and_then(Value::as_str),
             Some("Author Name")
+        );
+    }
+
+    #[test]
+    fn parses_public_profile_redux_pins_when_resource_data_is_empty() {
+        let html = include_str!("../tests/fixtures/pinterest/public_profile_redux_pins.html");
+
+        let page = parse_public_profile_html(html).unwrap();
+
+        assert_eq!(
+            page.next_bookmark.as_deref(),
+            Some("bookmark-from-resource")
+        );
+        assert_eq!(page.pins.len(), 1);
+        assert_eq!(page.diagnostics.user_pins_resource_data_arrays, 0);
+        assert_eq!(page.diagnostics.initial_redux_state_scripts, 1);
+        assert_eq!(page.diagnostics.initial_redux_state_parse_errors, 0);
+        assert_eq!(page.diagnostics.initial_redux_state_pin_maps, 1);
+        assert_eq!(page.diagnostics.initial_redux_state_pins, 1);
+        let saved = &page.pins[0];
+        assert_eq!(saved.pin.id, "333");
+        assert_eq!(saved.pin.title.as_deref(), Some("Redux fallback pin"));
+        assert_eq!(
+            saved.pin.created_at.as_deref(),
+            Some("2026-06-15T03:01:00+00:00")
+        );
+        assert_eq!(saved.pin.board_id.as_deref(), Some("board-3"));
+        assert_eq!(
+            saved.board.as_ref().and_then(|board| board.name.as_deref()),
+            Some("fallback board")
+        );
+        assert_eq!(
+            saved.pin.best_image_url(),
+            Some("https://i.pinimg.com/736x/redux.jpg")
         );
     }
 
