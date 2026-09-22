@@ -296,6 +296,148 @@ pub async fn resolve_access_token(settings: &Settings) -> Result<String> {
         .ok_or_else(|| anyhow!("PINTEREST_ACCESS_TOKEN is required"))
 }
 
+/// An HTML response and the session metadata needed for subsequent public requests.
+struct PublicHtmlPage {
+	html: String,
+	final_url: Url,
+	cookie_header: Option<HeaderValue>,
+}
+
+/// Retries transient GET failures, including errors while consuming an HTTP 200 body.
+///
+/// Request-level retries alone cannot catch malformed chunked response bodies.
+/// Keep retries limited to these read-only HTML downloads, never note creation.
+async fn fetch_public_html(
+	client: &reqwest::Client,
+	url: &Url,
+	configured_cookie: Option<&HeaderValue>,
+) -> reqwest::Result<PublicHtmlPage> {
+	let mut attempt = 1;
+	loop {
+		match fetch_public_html_once(client, url, configured_cookie).await {
+			Ok(page) => return Ok(page),
+			Err(error) => {
+				let transient = error.is_timeout()
+					|| error.is_connect()
+					|| error.is_request()
+					|| error.is_body()
+					|| error.is_decode()
+					|| error
+						.status()
+						.is_some_and(|status| status.is_server_error());
+				if attempt >= 3 || !transient {
+					return Err(error);
+				}
+				warn!(
+					url = url.as_str(), attempt, error = %error,
+					"public Pinterest HTML download failed; retrying the complete response"
+				);
+				tokio::time::sleep(Duration::from_secs(attempt)).await;
+				attempt += 1;
+			}
+		}
+	}
+}
+
+/// Reads one complete response and retains cookies only after the body succeeds.
+async fn fetch_public_html_once(
+	client: &reqwest::Client,
+	url: &Url,
+	configured_cookie: Option<&HeaderValue>,
+) -> reqwest::Result<PublicHtmlPage> {
+	let mut request = client.get(url.clone()).header(
+		ACCEPT,
+		"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+	);
+	if let Some(cookie) = configured_cookie {
+		request = request.header(COOKIE, cookie.clone());
+	}
+	let response = request.send().await?.error_for_status()?;
+	let final_url = response.url().clone();
+	let cookie_header = merge_cookie_headers(
+		configured_cookie,
+		response_cookie_header(response.headers()).as_ref(),
+	);
+	let html = response.text().await?;
+	Ok(PublicHtmlPage {
+		html,
+		final_url,
+		cookie_header,
+	})
+}
+
+/// Restores metadata omitted by image-only public profile records.
+///
+/// Called only for new pins without a title, including when comment scraping is
+/// disabled. A detail page may identify the original pin, so its ID must never
+/// replace the saved pin's ID used by sync state and Evernote's source URL.
+pub async fn enrich_public_pin_details(
+	saved: &mut SavedPin,
+	pinterest_cookie: Option<&str>,
+) -> Result<()> {
+	if saved.pin.title.as_deref().and_then(clean_string).is_some() {
+		return Ok(());
+	}
+	let client = reqwest::Client::builder()
+		.user_agent(CLIENT_NAME)
+		.timeout(REQUEST_TIMEOUT)
+		.build()
+		.context("failed to build Pinterest pin details HTTP client")?;
+	let url = Url::parse(&saved.pin.pin_url())?;
+	let cookie = configured_pinterest_cookie_header(pinterest_cookie)?;
+	let page = fetch_public_html(&client, &url, cookie.as_ref())
+		.await
+		.with_context(|| format!("public Pinterest pin details download stage failed for {url}"))?;
+	apply_public_pin_details_html(saved, &page.html).with_context(|| {
+		format!(
+			"public Pinterest pin details metadata stage failed for {}",
+			page.final_url
+		)
+	})?;
+	info!(
+		pin_id = saved.pin.id,
+		title_found = saved.pin.title.is_some(),
+		"enriched public Pinterest pin metadata"
+	);
+	Ok(())
+}
+
+/// Fills missing text fields without replacing saved-pin identity or board/media data.
+fn apply_public_pin_details_html(saved: &mut SavedPin, html: &str) -> Result<()> {
+	let details = json_ld_scripts(html)
+		.into_iter()
+		.find_map(|script| {
+			let value = serde_json::from_str::<Value>(script.trim()).ok()?;
+			find_json_ld_post(&value)
+		})
+		.ok_or_else(|| anyhow!("pin page has no parseable SocialMediaPosting JSON-LD"))?;
+	for (target, source) in [
+		(&mut saved.pin.title, details.pin.title),
+		(&mut saved.pin.description, details.pin.description),
+		(&mut saved.pin.link, details.pin.link),
+	] {
+		if target.as_deref().and_then(clean_string).is_none() {
+			*target = source;
+		}
+	}
+	Ok(())
+}
+
+/// Selects the pin's JSON-LD posting, ignoring unrelated WebPage/Person metadata.
+fn find_json_ld_post(value: &Value) -> Option<SavedPin> {
+	match value {
+		Value::Array(values) => values.iter().find_map(find_json_ld_post),
+		Value::Object(object) => {
+			if string_field(value, "@type").as_deref() == Some("SocialMediaPosting") {
+				parse_json_ld_pin(value)
+			} else {
+				object.get("@graph").and_then(find_json_ld_post)
+			}
+		}
+		_ => None,
+	}
+}
+
 pub async fn public_profile_saved_pins(settings: &Settings) -> Result<Vec<SavedPin>> {
     let source = settings
         .public_profile_to_parse_without_api
@@ -315,34 +457,13 @@ pub async fn public_profile_saved_pins(settings: &Settings) -> Result<Vec<SavedP
     );
     let configured_cookie_header =
         configured_pinterest_cookie_header(settings.pinterest_cookie.as_deref())?;
-    let mut page_request = client.get(url.clone()).header(
-        reqwest::header::ACCEPT,
-        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    );
-    if let Some(cookie_header) = &configured_cookie_header {
-        page_request = page_request.header(COOKIE, cookie_header.clone());
-    }
-    let response = page_request
-        .send()
-        .await
-        .with_context(|| format!("failed to fetch public Pinterest profile {url}"))?;
-
-    let status = response.status();
-    let final_url = response.url().clone();
-    let cookie_header = merge_cookie_headers(
-        configured_cookie_header.as_ref(),
-        response_cookie_header(response.headers()).as_ref(),
-    );
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(anyhow!(
-            "public Pinterest profile fetch returned HTTP {status} for {final_url}: {body}"
-        ));
-    }
-
-    let html = response.text().await.with_context(|| {
-        format!("failed to read public Pinterest profile HTML from {final_url}")
-    })?;
+	let PublicHtmlPage {
+		html,
+		final_url,
+		cookie_header,
+	} = fetch_public_html(&client, &url, configured_cookie_header.as_ref())
+		.await
+		.with_context(|| format!("failed to download public Pinterest profile HTML from {url}"))?;
     // The first page is real HTML. It normally contains Pinterest's embedded
     // UserPinsResource state; JSON-LD is kept as a weaker fallback.
     let mut page = parse_public_profile_html(&html)?;
@@ -1700,7 +1821,8 @@ fn collect_json_ld_pins(value: &Value, pins: &mut Vec<SavedPin>, seen: &mut BTre
 
 fn parse_json_ld_pin(value: &Value) -> Option<SavedPin> {
     let pin_url = string_field(value, "url")
-        .or_else(|| nested_string_field(value, &["mainEntityOfPage", "url"]))?;
+        .or_else(|| nested_string_field(value, &["mainEntityOfPage", "url"]))
+		.or_else(|| nested_string_field(value, &["mainEntityOfPage", "@id"]))?;
     let id = extract_pin_id_from_url(&pin_url)?;
     let image_url = image_url_from_value(value.get("image"))
         .or_else(|| image_url_from_value(value.get("thumbnailUrl")));
@@ -1727,8 +1849,9 @@ fn parse_json_ld_pin(value: &Value) -> Option<SavedPin> {
         pin: PinterestPin {
             id,
             title: string_field(value, "headline").or_else(|| string_field(value, "name")),
-            description: string_field(value, "description"),
-            link: None,
+            description: string_field(value, "description")
+				.or_else(|| string_field(value, "articleBody")),
+            link: nested_string_field(value, &["sharedContent", "url"]),
             created_at: string_field(value, "datePublished").map(normalize_pinterest_datetime),
             board_id: None,
             board_section_id: None,
@@ -1828,6 +1951,211 @@ fn extract_pin_id_from_url(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+	use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+	const INVALID_CHUNK_RESPONSE: &str =
+		"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\ninvalid\r\n";
+	const OK_HTML_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nSet-Cookie: csrftoken=new; Path=/\r\nConnection: close\r\n\r\nok";
+
+	/// Serves raw HTTP to reproduce framing errors that JSON mock servers hide.
+	async fn mock_html_server(
+		responses: Vec<&'static str>,
+	) -> (Url, tokio::task::JoinHandle<Vec<String>>) {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+		let server = tokio::spawn(async move {
+			let mut requests = Vec::new();
+			for response in responses {
+				let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+					.await
+					.unwrap()
+					.unwrap();
+				let mut request = Vec::new();
+				let mut buffer = [0; 1024];
+				while !request.ends_with(b"\r\n\r\n") {
+					let count = stream.read(&mut buffer).await.unwrap();
+					assert_ne!(count, 0);
+					request.extend_from_slice(&buffer[..count]);
+				}
+				requests.push(String::from_utf8(request).unwrap());
+				stream.write_all(response.as_bytes()).await.unwrap();
+			}
+			requests
+		});
+		(url, server)
+	}
+
+	/// The failed CI job received HTTP 200 followed by an invalid chunk size.
+	#[tokio::test]
+	async fn retries_public_html_after_malformed_chunk_with_cookies() {
+		let (url, server) = mock_html_server(vec![INVALID_CHUNK_RESPONSE, OK_HTML_RESPONSE]).await;
+		let client = reqwest::Client::builder()
+			.no_proxy()
+			.timeout(Duration::from_secs(5))
+			.build()
+			.unwrap();
+		let cookie = HeaderValue::from_static("session=test");
+		let page = fetch_public_html(&client, &url, Some(&cookie))
+			.await
+			.expect("retry complete HTML download");
+		assert_eq!(page.html, "ok");
+		assert_eq!(page.final_url, url);
+		assert_eq!(page.cookie_header.unwrap(), "csrftoken=new; session=test");
+		let requests = server.await.unwrap();
+		assert_eq!(requests.len(), 2);
+		assert!(
+			requests
+				.iter()
+				.all(|request| request.contains("cookie: session=test\r\n"))
+		);
+	}
+
+	/// Temporary upstream failures should use the same bounded download retry.
+	#[tokio::test]
+	async fn retries_public_html_server_error() {
+		let (url, server) = mock_html_server(vec![
+			"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+			OK_HTML_RESPONSE,
+		])
+		.await;
+		let client = reqwest::Client::builder().no_proxy().build().unwrap();
+		assert_eq!(
+			fetch_public_html(&client, &url, None).await.unwrap().html,
+			"ok"
+		);
+		assert_eq!(server.await.unwrap().len(), 2);
+	}
+
+	/// A permanently broken response must still fail after three attempts.
+	#[tokio::test]
+	async fn limits_public_html_body_retries() {
+		let (url, server) = mock_html_server(vec![INVALID_CHUNK_RESPONSE; 3]).await;
+		let client = reqwest::Client::builder().no_proxy().build().unwrap();
+		let result = fetch_public_html(&client, &url, None).await;
+		assert!(matches!(result, Err(error) if error.is_decode()));
+		assert_eq!(server.await.unwrap().len(), 3);
+	}
+
+	/// Retrying a missing/private page cannot repair a permanent HTTP client error.
+	#[tokio::test]
+	async fn does_not_retry_public_html_not_found() {
+		let (url, server) = mock_html_server(vec![
+			"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+		])
+		.await;
+		let client = reqwest::Client::builder().no_proxy().build().unwrap();
+		let result = fetch_public_html(&client, &url, None).await;
+		assert!(matches!(result, Err(error) if error.status() == Some(StatusCode::NOT_FOUND)));
+		assert_eq!(server.await.unwrap().len(), 1);
+	}
+
+	/// Page metadata belongs to the original pin; deduplication tracks the saved copy.
+	#[test]
+	fn enriches_sparse_pin_without_replacing_saved_identity() {
+		let mut saved = parse_public_profile_resource_pin(&serde_json::json!({
+			"id": "999",
+			"images": {"orig": {"url": "https://i.pinimg.com/originals/saved.jpg"}},
+			"board": {"id": "my-board", "name": "My room"},
+			"created_at": "2026-09-21T17:17:47Z"
+		}))
+		.unwrap();
+		let mut expected = saved.clone();
+		expected.pin.title = Some("Dorm Room Hogwarts #decor".to_string());
+		expected.pin.description = Some("A cozy bedroom filled with books. #room".to_string());
+		expected.pin.link = Some("https://example.com/dorm-room".to_string());
+
+		apply_public_pin_details_html(
+			&mut saved,
+			include_str!("../tests/fixtures/pinterest/public_pin_details.html"),
+		)
+		.unwrap();
+		assert_eq!(saved, expected);
+		assert_eq!(saved.pin.pin_url(), "https://www.pinterest.com/pin/999/");
+		assert_eq!(crate::note::title(&saved), "Dorm Room Hogwarts");
+		assert_eq!(crate::note::pin_hashtags(&saved), vec!["decor", "room"]);
+	}
+
+	/// Detail-page enrichment must preserve titles and descriptions the user saved.
+	#[test]
+	fn public_pin_details_preserve_existing_metadata() {
+		let mut saved = parse_public_profile_resource_pin(&serde_json::json!({
+			"id": "999", "grid_title": "My title", "description": "My description",
+			"link": "https://example.com/my-link"
+		}))
+		.unwrap();
+		let expected = saved.clone();
+		apply_public_pin_details_html(
+			&mut saved,
+			include_str!("../tests/fixtures/pinterest/public_pin_details.html"),
+		)
+		.unwrap();
+		assert_eq!(saved, expected);
+	}
+
+	/// Login pages and unrelated JSON-LD must not become an Evernote note title.
+	#[test]
+	fn public_pin_details_ignore_unrelated_or_invalid_json_ld() {
+		let mut saved = parse_public_profile_resource_pin(&serde_json::json!({"id": "999"})).unwrap();
+		let expected = saved.clone();
+		let unrelated = r#"<script type='application/ld+json'>{invalid</script>
+				<script type='application/ld+json'>{"@type":"WebPage","name":"Pinterest login","url":"https://www.pinterest.com/pin/999/"}</script>"#;
+		assert!(apply_public_pin_details_html(&mut saved, unrelated).is_err());
+		assert_eq!(saved, expected);
+		let html = format!(
+			"{unrelated}{}",
+			include_str!("../tests/fixtures/pinterest/public_pin_details.html")
+		);
+		apply_public_pin_details_html(&mut saved, &html).unwrap();
+		assert_eq!(crate::note::title(&saved), "Dorm Room Hogwarts");
+	}
+
+	/// JSON-LD may wrap the posting in an array or a graph.
+	#[test]
+	fn public_pin_details_accept_json_ld_graph() {
+		let html = include_str!("../tests/fixtures/pinterest/public_pin_details.html");
+		let value = fixture_json(json_ld_scripts(html)[0]);
+		let graph =
+			serde_json::json!({"@graph": [null, {"@type": "Person", "name": "Someone"}, value]});
+		assert_eq!(
+			find_json_ld_post(&graph).unwrap().pin.title.as_deref(),
+			Some("Dorm Room Hogwarts #decor")
+		);
+	}
+
+	/// Already titled pins must not require cookies or another network request.
+	#[tokio::test]
+	async fn skips_public_pin_details_when_title_is_present() {
+		let mut saved =
+			parse_public_profile_resource_pin(&serde_json::json!({"id": "999", "title": "My title"}))
+				.unwrap();
+		enrich_public_pin_details(&mut saved, Some("invalid\ncookie"))
+			.await
+			.unwrap();
+		assert_eq!(saved.pin.title.as_deref(), Some("My title"));
+	}
+
+	/// Reproduces the JSON-LD shape now served by individual public pin pages.
+	#[test]
+	fn parses_public_pin_details_title_description_and_source() {
+		let html = include_str!("../tests/fixtures/pinterest/public_pin_details.html");
+		let value = fixture_json(json_ld_scripts(html)[0]);
+		let saved = parse_json_ld_pin(&value).expect("pin metadata from mainEntityOfPage @id");
+
+		assert_eq!(
+			saved.pin.title.as_deref(),
+			Some("Dorm Room Hogwarts #decor")
+		);
+		assert_eq!(
+			saved.pin.description.as_deref(),
+			Some("A cozy bedroom filled with books. #room")
+		);
+		assert_eq!(
+			saved.pin.link.as_deref(),
+			Some("https://example.com/dorm-room")
+		);
+		assert_eq!(crate::note::title(&saved), "Dorm Room Hogwarts");
+		assert_eq!(crate::note::pin_hashtags(&saved), vec!["decor", "room"]);
+	}
 
     fn fixture_json(raw: &str) -> Value {
         serde_json::from_str(raw).expect("fixture JSON")

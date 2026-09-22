@@ -10,8 +10,8 @@ use crate::evernote_client::EvernoteClient;
 use crate::image::ImageDownloader;
 use crate::note;
 use crate::pinterest::{
-    PinterestClient, SavedPin, public_profile_saved_pins, resolve_access_token,
-    scrape_public_pin_comments,
+	PinterestClient, SavedPin, enrich_public_pin_details, public_profile_saved_pins,
+	resolve_access_token, scrape_public_pin_comments,
 };
 use crate::state::State;
 
@@ -118,6 +118,16 @@ async fn export_pin(
     image_downloader: Option<&ImageDownloader>,
     mut saved: SavedPin,
 ) -> Result<()> {
+	if settings.public_profile_to_parse_without_api.is_some()
+		&& let Err(error) =
+			enrich_public_pin_details(&mut saved, settings.pinterest_cookie.as_deref()).await
+	{
+		warn!(
+			pin_id = saved.pin.id,
+			error = %format!("{error:#}"),
+			"failed to fetch public Pinterest pin metadata; continuing with profile metadata"
+		);
+	}
     if settings.scrape_pin_comments {
         // Comment scraping is best-effort because it depends on Pinterest's public
         // web endpoints. A comments failure must not block exporting the pin itself.
