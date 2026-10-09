@@ -18,6 +18,14 @@ pub fn title(saved: &SavedPin) -> String {
     truncate_title(&title)
 }
 
+/// Reports whether Pinterest supplied title text that remains after tag extraction.
+///
+/// A title containing only hashtags is useful for Evernote tags but needs detail-page
+/// enrichment before it can become an Evernote note title.
+pub fn has_usable_title(raw: Option<&str>) -> bool {
+	raw.and_then(clean_title_without_hashtags).is_some()
+}
+
 pub fn pin_hashtags(saved: &SavedPin) -> Vec<String> {
     let mut tags = Vec::new();
     for raw in [saved.pin.title.as_deref(), saved.pin.description.as_deref()]
@@ -517,6 +525,8 @@ mod tests {
     #[test]
     fn title_falls_back_and_truncates() {
         assert_eq!(title(&saved_pin_with_title("#tag | ---")), "Pinterest pin");
+		assert!(!has_usable_title(Some("#tag | ---")));
+		assert!(has_usable_title(Some("A useful pin title")));
 
         let long_title = "a".repeat(300);
         let title = title(&saved_pin_with_title(&long_title));

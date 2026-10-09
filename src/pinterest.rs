@@ -12,6 +12,7 @@ use tracing::{info, warn};
 use url::Url;
 
 use crate::config::{PinterestFetchMode, Settings};
+use crate::note;
 
 const CLIENT_NAME: &str = "pinterest-saves-to-evernote/0.1";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -303,6 +304,39 @@ struct PublicHtmlPage {
 	cookie_header: Option<HeaderValue>,
 }
 
+/// Text fields recovered from a public Pinterest pin-detail page.
+#[derive(Default)]
+struct PublicPinDetails {
+	title: Option<String>,
+	description: Option<String>,
+	source_link: Option<String>,
+}
+
+impl PublicPinDetails {
+	/// Fills missing fields, retaining hashtags when the preferred title is only tags.
+	fn fill_missing(&mut self, fallback: Self) {
+		if !note::has_usable_title(self.title.as_deref())
+			&& let Some(title) = fallback.title
+		{
+			self.title = Some(match self.title.take() {
+				Some(existing) => format!("{existing} | {title}"),
+				None => title,
+			});
+		}
+		if self.description.is_none() {
+			self.description = fallback.description;
+		}
+		if self.source_link.is_none() {
+			self.source_link = fallback.source_link;
+		}
+	}
+
+	/// Returns whether parsing produced anything useful for note enrichment.
+	fn is_empty(&self) -> bool {
+		self.title.is_none() && self.description.is_none() && self.source_link.is_none()
+	}
+}
+
 /// Retries transient GET failures, including errors while consuming an HTTP 200 body.
 ///
 /// Request-level retries alone cannot catch malformed chunked response bodies.
@@ -368,14 +402,14 @@ async fn fetch_public_html_once(
 
 /// Restores metadata omitted by image-only public profile records.
 ///
-/// Called only for new pins without a title, including when comment scraping is
+/// Called only for new pins without a usable title, including when comment scraping is
 /// disabled. A detail page may identify the original pin, so its ID must never
 /// replace the saved pin's ID used by sync state and Evernote's source URL.
 pub async fn enrich_public_pin_details(
 	saved: &mut SavedPin,
 	pinterest_cookie: Option<&str>,
 ) -> Result<()> {
-	if saved.pin.title.as_deref().and_then(clean_string).is_some() {
+	if note::has_usable_title(saved.pin.title.as_deref()) {
 		return Ok(());
 	}
 	let client = reqwest::Client::builder()
@@ -396,7 +430,7 @@ pub async fn enrich_public_pin_details(
 	})?;
 	info!(
 		pin_id = saved.pin.id,
-		title_found = saved.pin.title.is_some(),
+		title_found = note::has_usable_title(saved.pin.title.as_deref()),
 		"enriched public Pinterest pin metadata"
 	);
 	Ok(())
@@ -404,23 +438,79 @@ pub async fn enrich_public_pin_details(
 
 /// Fills missing text fields without replacing saved-pin identity or board/media data.
 fn apply_public_pin_details_html(saved: &mut SavedPin, html: &str) -> Result<()> {
-	let details = json_ld_scripts(html)
+	let mut details = public_pin_details_from_json_ld(html).unwrap_or_default();
+	details.fill_missing(public_pin_details_from_open_graph(html));
+	if details.is_empty() {
+		return Err(anyhow!(
+			"pin page has no usable JSON-LD or Open Graph title, description, or source link"
+		));
+	}
+
+	if !note::has_usable_title(saved.pin.title.as_deref())
+		&& let Some(title) = details.title
+	{
+		let existing = saved.pin.title.as_deref().and_then(clean_string);
+		saved.pin.title = Some(match existing {
+			Some(existing) => format!("{existing} | {title}"),
+			None => title,
+		});
+	}
+	if saved
+		.pin
+		.description
+		.as_deref()
+		.and_then(clean_string)
+		.is_none()
+	{
+		saved.pin.description = details.description;
+	}
+	if saved.pin.link.as_deref().and_then(clean_string).is_none() {
+		saved.pin.link = details.source_link;
+	}
+	Ok(())
+}
+
+/// Parses the preferred structured metadata embedded in Pinterest pin pages.
+fn public_pin_details_from_json_ld(html: &str) -> Option<PublicPinDetails> {
+	json_ld_scripts(html)
 		.into_iter()
 		.find_map(|script| {
 			let value = serde_json::from_str::<Value>(script.trim()).ok()?;
 			find_json_ld_post(&value)
 		})
-		.ok_or_else(|| anyhow!("pin page has no parseable SocialMediaPosting JSON-LD"))?;
-	for (target, source) in [
-		(&mut saved.pin.title, details.pin.title),
-		(&mut saved.pin.description, details.pin.description),
-		(&mut saved.pin.link, details.pin.link),
-	] {
-		if target.as_deref().and_then(clean_string).is_none() {
-			*target = source;
+		.map(|saved| PublicPinDetails {
+			title: saved.pin.title,
+			description: saved.pin.description,
+			source_link: saved.pin.link,
+		})
+}
+
+/// Parses Open Graph metadata with an HTML parser so entities and quoting are handled.
+///
+/// Pinterest can stream metadata into the body after the initial head. Parse real
+/// elements anywhere in the document, excluding tag-like text in scripts/comments.
+/// Generic document titles alone can describe login/error pages and are not used.
+fn public_pin_details_from_open_graph(html: &str) -> PublicPinDetails {
+	let document = scraper::Html::parse_document(html);
+	let selector = scraper::Selector::parse("meta").expect("valid metadata selector");
+	let mut details = PublicPinDetails::default();
+	for element in document.select(&selector) {
+		let element = element.value();
+		let Some(name) = element.attr("property").or_else(|| element.attr("name")) else {
+			continue;
+		};
+		let target = if name.eq_ignore_ascii_case("og:title") {
+			&mut details.title
+		} else if name.eq_ignore_ascii_case("og:description") {
+			&mut details.description
+		} else {
+			continue;
+		};
+		if target.is_none() {
+			*target = element.attr("content").and_then(clean_string);
 		}
 	}
-	Ok(())
+	details
 }
 
 /// Selects the pin's JSON-LD posting, ignoring unrelated WebPage/Person metadata.
@@ -2073,6 +2163,134 @@ mod tests {
 		assert_eq!(saved.pin.pin_url(), "https://www.pinterest.com/pin/999/");
 		assert_eq!(crate::note::title(&saved), "Dorm Room Hogwarts");
 		assert_eq!(crate::note::pin_hashtags(&saved), vec!["decor", "room"]);
+	}
+
+	/// Models a page without JSON-LD using Open Graph fields from the reported pin.
+	#[test]
+	fn enriches_sparse_pin_from_open_graph_metadata_when_json_ld_is_absent() {
+		let mut saved = parse_public_profile_resource_pin(&serde_json::json!({"id": "999"})).unwrap();
+
+		apply_public_pin_details_html(
+			&mut saved,
+			include_str!("../tests/fixtures/pinterest/public_pin_details_open_graph.html"),
+		)
+		.expect("Open Graph metadata should enrich the pin");
+
+		assert_eq!(
+			saved.pin.title.as_deref(),
+			Some("Desktop computers from 1985 to 2026. 1995 internet got popular. 1991 started World Wide Web. | Computer technology, Computer system, Computer for office")
+		);
+		assert_eq!(
+			saved.pin.description.as_deref(),
+			Some("Aug 21, 2026 — Desktop computers from 1985 to 2026. 1995 internet got popular. 1991 started World Wide Web. Computer evolution, Early 2000s aesthetic, Noir detective")
+		);
+		assert_eq!(
+			crate::note::title(&saved),
+			"Desktop computers from 1985 to 2026. 1995 internet got popular. 1991 started World Wide Web. | Computer technology, Computer system, Computer for office"
+		);
+	}
+
+	/// The second reported pin supplies its Cyrillic title through streamed metadata.
+	#[test]
+	fn enriches_unicode_pin_from_streamed_open_graph_metadata() {
+		let mut saved = parse_public_profile_resource_pin(&serde_json::json!({
+			"id": "96475617015549017"
+		}))
+		.unwrap();
+		apply_public_pin_details_html(
+			&mut saved,
+			include_str!("../tests/fixtures/pinterest/public_pin_details_unicode_open_graph.html"),
+		)
+		.unwrap();
+		assert_eq!(
+			crate::note::title(&saved),
+			"Девушка с андроидом неофолк трэд | The android lady aesthetic, The android lady fanart"
+		);
+		assert_eq!(
+			saved.pin.pin_url(),
+			"https://www.pinterest.com/pin/96475617015549017/"
+		);
+	}
+
+	/// Hashtags still become Evernote tags when detail metadata supplies the title text.
+	#[test]
+	fn keeps_hashtag_only_profile_title_when_open_graph_enriches_it() {
+		let mut saved = parse_public_profile_resource_pin(&serde_json::json!({
+			"id": "999",
+			"title": "#retrocomputers"
+		}))
+		.unwrap();
+
+		apply_public_pin_details_html(
+			&mut saved,
+			include_str!("../tests/fixtures/pinterest/public_pin_details_open_graph.html"),
+		)
+		.unwrap();
+
+		assert_eq!(
+			saved.pin.title.as_deref(),
+			Some("#retrocomputers | Desktop computers from 1985 to 2026. 1995 internet got popular. 1991 started World Wide Web. | Computer technology, Computer system, Computer for office")
+		);
+		assert_eq!(
+			crate::note::title(&saved),
+			"Desktop computers from 1985 to 2026. 1995 internet got popular. 1991 started World Wide Web. | Computer technology, Computer system, Computer for office"
+		);
+		assert_eq!(crate::note::pin_hashtags(&saved), vec!["retrocomputers"]);
+	}
+
+	/// Metadata parsing must decode entities and skip tag-like text inside scripts/comments.
+	#[test]
+	fn public_pin_details_parse_html_metadata_as_html() {
+		let mut saved = parse_public_profile_resource_pin(&serde_json::json!({"id": "999"})).unwrap();
+		let html = r#"<html><head>
+			<!-- <meta property='og:title' content='Comment decoy'> -->
+			<script>const example = "<meta property='og:title' content='Script decoy'>";</script>
+			<META CONTENT='Arts &amp; crafts &#x2764; &lt;3' PROPERTY='og:title'>
+			<meta name='og:description' content="It&#39;s &quot;handmade&quot; &amp; fun > ordinary.">
+		</head></html>"#;
+
+		apply_public_pin_details_html(&mut saved, html).unwrap();
+		assert_eq!(crate::note::title(&saved), "Arts & crafts \u{2764} <3");
+		assert_eq!(
+			saved.pin.description.as_deref(),
+			Some("It's \"handmade\" & fun > ordinary.")
+		);
+	}
+
+	/// A document title alone can describe a login/error page rather than a pin.
+	#[test]
+	fn public_pin_details_ignore_generic_document_metadata() {
+		let mut saved = parse_public_profile_resource_pin(&serde_json::json!({"id": "999"})).unwrap();
+		let expected = saved.clone();
+		let html = "<html><head><title>Pinterest login</title><meta name='description' content='Log in to Pinterest'></head></html>";
+		assert!(apply_public_pin_details_html(&mut saved, html).is_err());
+		assert_eq!(saved, expected);
+	}
+
+	/// JSON-LD remains preferred while Open Graph fills fields it omits.
+	#[test]
+	fn public_pin_details_merge_metadata_by_priority() {
+		let base = include_str!("../tests/fixtures/pinterest/public_pin_details.html");
+		let fallback = "<meta property='og:title' content='Fallback title'><meta property='og:description' content='Fallback description'>";
+		let html = base.replace("</head>", &format!("{fallback}</head>"));
+		let mut saved = parse_public_profile_resource_pin(&serde_json::json!({"id": "999"})).unwrap();
+		apply_public_pin_details_html(&mut saved, &html).unwrap();
+		assert_eq!(crate::note::title(&saved), "Dorm Room Hogwarts");
+		assert_eq!(
+			saved.pin.description.as_deref(),
+			Some("A cozy bedroom filled with books. #room")
+		);
+		assert_eq!(saved.pin.link.as_deref(), Some("https://example.com/dorm-room"));
+
+		let html = html
+			.replace("Dorm Room Hogwarts #decor", "#decor")
+			.replace("A cozy bedroom filled with books. #room", "");
+		let mut saved = parse_public_profile_resource_pin(&serde_json::json!({"id": "999"})).unwrap();
+		apply_public_pin_details_html(&mut saved, &html).unwrap();
+		assert_eq!(crate::note::title(&saved), "Fallback title");
+		assert_eq!(crate::note::pin_hashtags(&saved), vec!["decor"]);
+		assert_eq!(saved.pin.description.as_deref(), Some("Fallback description"));
+		assert_eq!(saved.pin.link.as_deref(), Some("https://example.com/dorm-room"));
 	}
 
 	/// Detail-page enrichment must preserve titles and descriptions the user saved.
